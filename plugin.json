@@ -1,14 +1,14 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
-  "name": "lavish-axi",
+  "name": "george-showroom",
   "version": "0.1.46",
-  "description": "HTML is the new markdown. Lavish is the new editor for your HTML artifacts.",
+  "description": "A local, visual review surface for agent-generated HTML artifacts.",
   "author": {
-    "name": "Kun Chen",
-    "url": "https://github.com/kunchenguid"
+    "name": "George Wang",
+    "url": "https://github.com/georgewangyu"
   },
-  "homepage": "https://github.com/kunchenguid/lavish-axi#readme",
-  "repository": "https://github.com/kunchenguid/lavish-axi",
+  "homepage": "https://github.com/georgewangyu/george-showroom#readme",
+  "repository": "https://github.com/georgewangyu/george-showroom",
   "license": "MIT",
   "keywords": [
     "axi",
@@ -16,6 +16,8 @@
     "cli",
     "html",
     "review",
-    "collaboration"
+    "collaboration",
+    "codex",
+    "showroom"
   ]
 }

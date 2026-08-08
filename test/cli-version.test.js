@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -12,12 +12,15 @@ import { promisify } from "node:util";
 import { isVersionOnlyArgv, VERSION } from "../src/cli.js";
 
 const execFileAsync = promisify(execFile);
-const BIN = fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url));
+const BINS = [
+  fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)),
+  fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)),
+];
 
-// A regression to the pre-fast-path behavior costs the full telemetry drain (up to
-// 1000ms) plus process startup. This budget sits far below that and far above the
-// ~60ms the fast path actually needs, so it catches the regression without flaking.
-const VERSION_BUDGET_MS = 500;
+// The exact no-telemetry/no-state assertions and lazy-import structure below are the
+// deterministic regression guards. This is a looser cold-process ceiling so parallel
+// CI load does not turn the performance smoke check into a flaky wall-clock test.
+const VERSION_BUDGET_MS = 1_000;
 
 // Accepts the telemetry connection and never answers, so a regression pays the whole
 // drain timeout instead of a fast connection refusal.
@@ -55,6 +58,20 @@ test("isVersionOnlyArgv matches exactly the SDK's version-flag shapes", () => {
   }
 });
 
+test("both CLI bins reach the version fast path before loading the full CLI", async () => {
+  const [runner, primary, compatibility] = await Promise.all([
+    readFile(new URL("../bin/run-cli.js", import.meta.url), "utf8"),
+    readFile(new URL("../bin/george-showroom.js", import.meta.url), "utf8"),
+    readFile(new URL("../bin/lavish-axi.js", import.meta.url), "utf8"),
+  ]);
+
+  assert.ok(runner.indexOf("VERSION_FLAGS.has") < runner.indexOf('await import("../src/cli.js")'));
+  assert.match(primary, /from "\.\/run-cli\.js"/);
+  assert.match(compatibility, /from "\.\/run-cli\.js"/);
+  assert.doesNotMatch(primary, /src\/cli\.js/);
+  assert.doesNotMatch(compatibility, /src\/cli\.js/);
+});
+
 test("--version prints the version fast and skips telemetry and state-dir init", async (t) => {
   const telemetry = await startBlackHoleTelemetry();
   const stateParent = await mkdtemp(path.join(tmpdir(), "lavish-version-"));
@@ -72,16 +89,18 @@ test("--version prints the version fast and skips telemetry and state-dir init",
     LAVISH_AXI_UMAMI_HOST: telemetry.host,
   };
 
-  for (const flag of ["--version", "-v", "-V"]) {
-    const startedAt = process.hrtime.bigint();
-    const { stdout } = await execFileAsync(process.execPath, [BIN, flag], { env });
-    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  for (const bin of BINS) {
+    for (const flag of ["--version", "-v", "-V"]) {
+      const startedAt = process.hrtime.bigint();
+      const { stdout } = await execFileAsync(process.execPath, [bin, flag], { env });
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
 
-    assert.equal(stdout, `${VERSION}\n`);
-    assert.ok(
-      elapsedMs < VERSION_BUDGET_MS,
-      `\`${flag}\` took ${Math.round(elapsedMs)}ms, over the ${VERSION_BUDGET_MS}ms budget`,
-    );
+      assert.equal(stdout, `${VERSION}\n`);
+      assert.ok(
+        elapsedMs < VERSION_BUDGET_MS,
+        `\`${path.basename(bin)} ${flag}\` took ${Math.round(elapsedMs)}ms, over the ${VERSION_BUDGET_MS}ms budget`,
+      );
+    }
   }
 
   // The heavy init is provably skipped: no telemetry request was ever sent, and the
@@ -99,7 +118,7 @@ test("a non-version invocation still runs the telemetry init the fast path skips
     await rm(stateParent, { recursive: true, force: true });
   });
 
-  await execFileAsync(process.execPath, [BIN, "design"], {
+  await execFileAsync(process.execPath, [BINS[0], "design"], {
     env: {
       ...process.env,
       LAVISH_AXI_STATE_DIR: stateDir,

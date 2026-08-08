@@ -16,11 +16,13 @@ process.env.LAVISH_AXI_LINK_HOST = "127.0.0.1";
 import {
   collapseHomeDirectory,
   computeCopilotCliHookUpdate,
+  computeLegacySessionHookCleanup,
   createCopilotCliAmbientContextScript,
   createCopilotCliSessionStartHook,
   createDesignOutput,
   createExportOutput,
   createHomeOutput,
+  createLegacyCopilotCliSessionStartHook,
   createOpenOutput,
   createPollOutput,
   createPlaybookOutput,
@@ -118,13 +120,13 @@ test("CLI version tracks package.json so release-please bumps reach the publishe
   assert.equal(VERSION, packageJson.version);
 });
 
-test("home output teaches agents when and how to use Lavish Editor", () => {
-  const output = createHomeOutput({ bin: `${os.homedir()}/.local/bin/lavish-axi`, sessions: [] });
+test("home output teaches agents when and how to use George Showroom", () => {
+  const output = createHomeOutput({ bin: `${os.homedir()}/.local/bin/george-showroom`, sessions: [] });
 
-  assert.equal(output.bin, "~/.local/bin/lavish-axi");
-  assert.match(output.description, /Lavish Editor/);
+  assert.equal(output.bin, "~/.local/bin/george-showroom");
+  assert.match(output.description, /George Showroom/);
   assert.match(output.description, /complex response/);
-  assert.match(output.description, /consider using Lavish Editor/);
+  assert.match(output.description, /consider using George Showroom/);
   assert.match(output.description, /First generate an interactive HTML artifact/);
   assert.deepEqual(output.sessions, []);
   assert.equal("use_cases" in output, false);
@@ -146,9 +148,9 @@ test("home output teaches agents when and how to use Lavish Editor", () => {
     output.playbooks.find((item) => item.id === "input")?.use_when,
     "Must be used when the agent needs to collect user input on decisions, choices, preferences, triage, scope, or other structured feedback from within the artifact",
   );
-  assert.ok(output.help.some((item) => item.includes("lavish-axi <html-file>")));
+  assert.ok(output.help.some((item) => item.includes("george-showroom <html-file>")));
   assert.ok(output.help.some((item) => item.includes("`.lavish/`")));
-  assert.ok(output.help.some((item) => item.includes("lavish-axi playbook <playbook_id>")));
+  assert.ok(output.help.some((item) => item.includes("george-showroom playbook <playbook_id>")));
   assert.ok(output.help.some((item) => item.includes("combines several playbooks")));
   assert.ok(output.help.some((item) => item.includes("MUST open each matching playbook")));
   assert.ok(output.help.some((item) => item.includes("reference other filesystem assets")));
@@ -178,13 +180,13 @@ test("the design-priority rule is single-sourced and keeps its three-step semant
   assert.ok(DESIGN_SYSTEM_HINT.includes(DESIGN_PRIORITY_RULE), "the home/skill hint embeds the rule");
   assert.match(DESIGN_SYSTEM_HINT, /does not auto-inject/);
   assert.match(DESIGN_SYSTEM_HINT, /portable/);
-  assert.match(DESIGN_SYSTEM_HINT, /lavish-axi design/);
+  assert.match(DESIGN_SYSTEM_HINT, /george-showroom design/);
   assert.match(DESIGN_SYSTEM_HINT, /state which of the three design sources/);
 });
 
 test("home output warns agents that poll needs an observable wake path", () => {
-  const output = createHomeOutput({ bin: "lavish-axi", sessions: [] });
-  const pollHelp = output.help.find((item) => item.includes("lavish-axi poll <html-file>"));
+  const output = createHomeOutput({ bin: "george-showroom", sessions: [] });
+  const pollHelp = output.help.find((item) => item.includes("george-showroom poll <html-file>"));
 
   assert.ok(pollHelp, "home help mentions the poll command");
   assert.match(pollHelp, /long-poll/);
@@ -202,15 +204,15 @@ test("home output warns agents that poll needs an observable wake path", () => {
 test("ambient and per-artifact output never nags about installing the plugin", () => {
   // Home output loads on every session and open/poll run constantly; setup belongs in the
   // setup surfaces only, so an install prompt here would be pure recurring token cost.
-  const home = createHomeOutput({ bin: "lavish-axi", sessions: [] });
+  const home = createHomeOutput({ bin: "george-showroom", sessions: [] });
 
   assert.doesNotMatch(JSON.stringify(home), /setup plugin/);
   assert.doesNotMatch(JSON.stringify(home), /setup hooks/);
 });
 
 test("home output tailors poll guidance when invoked under Codex", () => {
-  const output = createHomeOutput({ bin: "lavish-axi", sessions: [], agent: "codex" });
-  const pollHelp = output.help.find((item) => item.includes("lavish-axi poll <html-file>"));
+  const output = createHomeOutput({ bin: "george-showroom", sessions: [], agent: "codex" });
+  const pollHelp = output.help.find((item) => item.includes("george-showroom poll <html-file>"));
 
   assertObservablePollWakePath(pollHelp);
   assert.match(pollHelp, /Codex detected/);
@@ -218,8 +220,8 @@ test("home output tailors poll guidance when invoked under Codex", () => {
 });
 
 test("home output keeps static skill poll guidance safe and agent-neutral", () => {
-  const output = createHomeOutput({ bin: "lavish-axi", sessions: [], agent: "static" });
-  const pollHelp = output.help.find((item) => item.includes("lavish-axi poll <html-file>"));
+  const output = createHomeOutput({ bin: "george-showroom", sessions: [], agent: "static" });
+  const pollHelp = output.help.find((item) => item.includes("george-showroom poll <html-file>"));
 
   assertObservablePollWakePath(pollHelp);
   assert.doesNotMatch(pollHelp, /keep the poll attached to the active turn/i);
@@ -236,11 +238,11 @@ test("invoking agent detection recognizes Codex runtime markers only", () => {
 });
 
 test("top-level help renders static home output without dynamic sessions", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-help-test-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-help-test-`);
   try {
     const result = spawnSync(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "--help"],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "--help"],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         encoding: "utf8",
@@ -250,11 +252,11 @@ test("top-level help renders static home output without dynamic sessions", async
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.match(result.stdout, /playbooks\[7\]/);
-    assert.match(result.stdout, /lavish-axi playbook <playbook_id>/);
+    assert.match(result.stdout, /george-showroom playbook <playbook_id>/);
     assert.match(result.stdout, /reference other filesystem assets/);
     assert.match(result.stdout, /same directory as the HTML file/);
     assert.match(result.stdout, /Tailwind CSS browser runtime v4/);
-    assert.match(result.stdout, /lavish-axi design/);
+    assert.match(result.stdout, /george-showroom design/);
     assert.match(result.stdout, /strict priority order/);
     assert.match(result.stdout, /never kill it/);
     assert.match(result.stdout, /queued feedback is never lost/);
@@ -353,7 +355,7 @@ test("playbook index output lists known playbooks with concise descriptions", ()
     "Must be used when the agent needs to collect user input on decisions, choices, preferences, triage, scope, or other structured feedback from within the artifact",
   );
   assert.ok(output.playbooks.every((playbook) => playbook.use_when.length > 20));
-  assert.ok(output.help.some((item) => item.includes("lavish-axi playbook <playbook_id>")));
+  assert.ok(output.help.some((item) => item.includes("george-showroom playbook <playbook_id>")));
   assert.ok(output.help.some((item) => item.includes("combines several playbooks")));
   assert.ok(output.help.some((item) => item.includes("MUST open each matching playbook")));
 });
@@ -593,7 +595,7 @@ test("Mermaid after evidence embeds the shipped theme-aware snippet", async () =
   );
 });
 
-test("playbook detail output returns focused Lavish-native guidance", () => {
+test("playbook detail output returns focused George Showroom-native guidance", () => {
   const output = createPlaybookOutput(["input"]);
 
   assert.equal(output.playbook.id, "input");
@@ -611,7 +613,7 @@ test("playbook detail output returns focused Lavish-native guidance", () => {
   assert.ok(output.playbook.lavish_notes.some((item) => item.includes("onsubmit")));
   assert.ok(output.playbook.pitfalls.some((item) => item.includes("unclear")));
   assert.ok(output.playbook.pitfalls.some((item) => item.includes("radio change")));
-  assert.ok(output.playbook.lavish_notes.some((item) => item.includes("Lavish")));
+  assert.ok(output.playbook.lavish_notes.some((item) => item.includes("George Showroom")));
 });
 
 test("code playbook detail output requires verified @pierre/diffs rendering", () => {
@@ -642,7 +644,7 @@ test("unknown playbook ids produce an actionable validation error", () => {
       assert.ok(error instanceof AxiError);
       assert.equal(error.code, "VALIDATION_ERROR");
       assert.match(error.message, /Unknown playbook/);
-      assert.ok(error.suggestions.some((item) => item.includes("lavish-axi playbook")));
+      assert.ok(error.suggestions.some((item) => item.includes("george-showroom playbook")));
       return true;
     },
   );
@@ -650,12 +652,12 @@ test("unknown playbook ids produce an actionable validation error", () => {
 
 test("home directory collapse tolerates Windows mixed separators", () => {
   assert.equal(
-    collapseHomeDirectory("C:\\Users\\runneradmin/.local/bin/lavish-axi", "C:\\Users\\runneradmin"),
-    "~/.local/bin/lavish-axi",
+    collapseHomeDirectory("C:\\Users\\runneradmin/.local/bin/george-showroom", "C:\\Users\\runneradmin"),
+    "~/.local/bin/george-showroom",
   );
   assert.equal(
-    collapseHomeDirectory("C:\\Users\\runneradmin\\.local\\bin\\lavish-axi", "C:\\Users\\runneradmin"),
-    "~/.local/bin/lavish-axi",
+    collapseHomeDirectory("C:\\Users\\runneradmin\\.local\\bin\\george-showroom", "C:\\Users\\runneradmin"),
+    "~/.local/bin/george-showroom",
   );
 });
 
@@ -675,7 +677,7 @@ test("open output keeps the user URL in session data and next_step focused on po
   assert.doesNotMatch(output.next_step, /Tell the user (?:to open|to visit)/i);
   assert.doesNotMatch(output.next_step, /http:\/\/localhost:4387\/session\/abc123/);
   assert.match(output.next_step, /Do not respond to the user just yet\. Now you must run/);
-  assert.match(output.next_step, /lavish-axi poll \/tmp\/artifact\.html/);
+  assert.match(output.next_step, /george-showroom poll \/tmp\/artifact\.html/);
   assert.match(output.next_step, /Layout issues inbox/);
   assert.doesNotMatch(output.next_step, /layout_warnings/);
   assert.match(output.next_step, /never kill it/);
@@ -708,10 +710,10 @@ test("a user-ended open refuses with a status agents can branch on, not a URL to
 
   assert.equal(output.session.file, "/tmp/artifact.html");
   assert.equal(output.session.status, "user-ended");
-  assert.match(output.next_step, /user explicitly ended this Lavish Editor session from the browser/);
+  assert.match(output.next_step, /user explicitly ended this George Showroom session from the browser/);
   assert.match(output.next_step, /did not reopen it/);
   assert.match(output.next_step, /Do not reopen unless the user asks for further review/);
-  assert.match(output.next_step, /lavish-axi \/tmp\/artifact\.html --reopen/);
+  assert.match(output.next_step, /george-showroom \/tmp\/artifact\.html --reopen/);
 });
 
 test("export output reports the written file and reassures it needs no server", () => {
@@ -726,7 +728,7 @@ test("export output reports the written file and reassures it needs no server", 
   assert.equal(output.export.output, "/tmp/report.export.html");
   assert.equal(output.export.unresolved_local_assets, 0);
   assert.equal(output.export.bytes, Buffer.byteLength("<html></html>"));
-  assert.match(output.next_step, /no Lavish server/);
+  assert.match(output.next_step, /no George Showroom server/);
   assert.match(output.next_step, /remote CDN\/font references are left as links/);
 });
 
@@ -778,7 +780,7 @@ test("export output separates unresolved assets from notices", () => {
 });
 
 test("export command writes a portable HTML file next to the artifact", async () => {
-  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-export-test-`);
+  const dir = await mkdtemp(`${os.tmpdir()}/george-showroom-export-test-`);
   const artifact = `${dir}/report.html`;
   await writeFile(`${dir}/theme.css`, ".btn{color:rebeccapurple}", "utf8");
   await writeFile(
@@ -790,7 +792,7 @@ test("export command writes a portable HTML file next to the artifact", async ()
   try {
     const result = spawnSync(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "export", artifact],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "export", artifact],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         env: { ...process.env, LAVISH_AXI_STATE_DIR: dir, LAVISH_AXI_TELEMETRY: "0" },
@@ -811,14 +813,14 @@ test("export command writes a portable HTML file next to the artifact", async ()
 });
 
 test("export command treats --out value as an option operand, not the source file", async () => {
-  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-export-test-`);
+  const dir = await mkdtemp(`${os.tmpdir()}/george-showroom-export-test-`);
   const artifact = `${dir}/report.html`;
   const output = `${dir}/custom.html`;
   await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
   try {
     const result = spawnSync(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "export", "--out", output, artifact],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "export", "--out", output, artifact],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         env: { ...process.env, LAVISH_AXI_STATE_DIR: dir, LAVISH_AXI_TELEMETRY: "0" },
@@ -849,7 +851,7 @@ test("share output reports the public url and the secret update key", () => {
   assert.match(output.next_step, /PUBLIC/);
   assert.match(output.next_step, /update_key/);
   assert.match(output.next_step, /x\.ht-ml\.app/);
-  assert.match(output.next_step, /ht-ml\.app \(https:\/\/ht-ml\.app\), a third-party host not part of Lavish/);
+  assert.match(output.next_step, /ht-ml\.app \(https:\/\/ht-ml\.app\), a third-party host not part of George Showroom/);
 });
 
 test("password-protected share output tells viewers they also need the password", () => {
@@ -865,7 +867,7 @@ test("password-protected share output tells viewers they also need the password"
   assert.equal(output.share.visibility, "private");
   assert.match(output.next_step, /PASSWORD-PROTECTED/);
   assert.match(output.next_step, /viewers also need the password/);
-  assert.match(output.next_step, /ht-ml\.app \(https:\/\/ht-ml\.app\), a third-party host not part of Lavish/);
+  assert.match(output.next_step, /ht-ml\.app \(https:\/\/ht-ml\.app\), a third-party host not part of George Showroom/);
   assert.doesNotMatch(output.next_step, /anyone with the link can view/);
 });
 
@@ -879,7 +881,7 @@ test("share output surfaces local assets that could not be inlined", () => {
   assert.equal(output.share.unresolved_local_assets, 1);
   assert.deepEqual(output.unresolved_local_assets, [{ kind: "load-failed", ref: "./missing.png" }]);
   assert.match(output.next_step, /LOCAL assets could not be inlined/);
-  assert.match(output.next_step, /ht-ml\.app \(https:\/\/ht-ml\.app\), a third-party host not part of Lavish/);
+  assert.match(output.next_step, /ht-ml\.app \(https:\/\/ht-ml\.app\), a third-party host not part of George Showroom/);
   assert.doesNotMatch(output.next_step, /share this URL/);
 });
 
@@ -917,12 +919,12 @@ test("password-protected share output with unresolved assets still mentions the 
   assert.equal(output.share.visibility, "private");
   assert.match(output.next_step, /PASSWORD-PROTECTED/);
   assert.match(output.next_step, /viewers also need the password/);
-  assert.match(output.next_step, /ht-ml\.app \(https:\/\/ht-ml\.app\), a third-party host not part of Lavish/);
+  assert.match(output.next_step, /ht-ml\.app \(https:\/\/ht-ml\.app\), a third-party host not part of George Showroom/);
   assert.doesNotMatch(output.next_step, /anyone with the link can view/);
 });
 
 test("share command publishes the artifact to ht-ml.app and returns the public url", async () => {
-  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-test-`);
+  const dir = await mkdtemp(`${os.tmpdir()}/george-showroom-share-test-`);
   const artifact = `${dir}/report.html`;
   await writeFile(`${dir}/theme.css`, ".btn{color:teal}", "utf8");
   await writeFile(
@@ -938,7 +940,7 @@ test("share command publishes the artifact to ht-ml.app and returns the public u
     // on this process's event loop, which spawnSync would block, deadlocking the request.
     const child = spawn(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "share", "--password", "pw", artifact],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "share", "--password", "pw", artifact],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         env: {
@@ -974,7 +976,7 @@ test("share command publishes the artifact to ht-ml.app and returns the public u
 });
 
 test("share command treats a whitespace-only password as public", async () => {
-  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-share-test-`);
+  const dir = await mkdtemp(`${os.tmpdir()}/george-showroom-share-test-`);
   const artifact = `${dir}/report.html`;
   await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
 
@@ -983,7 +985,7 @@ test("share command treats a whitespace-only password as public", async () => {
   try {
     const child = spawn(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "share", "--password", "   ", artifact],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "share", "--password", "   ", artifact],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         env: {
@@ -1042,8 +1044,8 @@ test("poll help is Codex-aware when requested", () => {
 
 test("share help distinguishes public default from password-protected shares", () => {
   const help = getCommandHelp("share");
-  const home = createHomeOutput({ bin: "lavish-axi", sessions: [] });
-  const homeShareHelp = home.help.find((item) => item.includes("lavish-axi share <html-file>"));
+  const home = createHomeOutput({ bin: "george-showroom", sessions: [] });
+  const homeShareHelp = home.help.find((item) => item.includes("george-showroom share <html-file>"));
 
   assert.match(help, /PUBLIC by default/);
   assert.match(help, /Pass --password to publish a PRIVATE password-protected page/);
@@ -1205,11 +1207,11 @@ test("a poll reporting the session ended by the user tells the agent to stop and
 
   assert.equal(output.session.status, "ended");
   assert.equal(output.session.ended_by, "user");
-  assert.match(output.next_step, /user ended this Lavish Editor session/);
+  assert.match(output.next_step, /user ended this George Showroom session/);
   assert.match(output.next_step, /Stop polling/);
-  assert.match(output.next_step, /do not run `lavish-axi \/tmp\/report\.html` to reopen it/);
+  assert.match(output.next_step, /do not run `george-showroom \/tmp\/report\.html` to reopen it/);
   assert.match(output.next_step, /deliver any remaining updates directly in this conversation/i);
-  assert.match(output.next_step, /lavish-axi \/tmp\/report\.html --reopen/);
+  assert.match(output.next_step, /george-showroom \/tmp\/report\.html --reopen/);
 });
 
 test("a poll reporting an agent-ended session allows a plain reopen if still needed", () => {
@@ -1220,7 +1222,7 @@ test("a poll reporting an agent-ended session allows a plain reopen if still nee
 
   assert.equal(output.session.ended_by, "agent");
   assert.match(output.next_step, /Stop polling/);
-  assert.match(output.next_step, /lavish-axi \/tmp\/report\.html`\s+to open a fresh session/);
+  assert.match(output.next_step, /george-showroom \/tmp\/report\.html`\s+to open a fresh session/);
   assert.doesNotMatch(output.next_step, /--reopen/);
 });
 
@@ -1240,7 +1242,7 @@ test("the final feedback batch before a user end flags session_ended and skips t
   assert.equal(output.session.ended_by, "user");
   assert.match(output.next_step, /last feedback before the user ended the session/);
   assert.match(output.next_step, /Stop polling \/tmp\/report\.html and do not reopen it/);
-  assert.match(output.next_step, /lavish-axi \/tmp\/report\.html --reopen/);
+  assert.match(output.next_step, /george-showroom \/tmp\/report\.html --reopen/);
   assert.doesNotMatch(output.next_step, /reload or re-open/);
 });
 
@@ -1258,10 +1260,10 @@ test("the final feedback batch before an agent end preserves ended_by and allows
 
   assert.equal(output.session.session_ended, true);
   assert.equal(output.session.ended_by, "agent");
-  assert.match(output.next_step, /last feedback before the Lavish Editor session ended/);
-  assert.match(output.next_step, /lavish-axi \/tmp\/report\.html`\s+to open a fresh session/);
+  assert.match(output.next_step, /last feedback before the George Showroom session ended/);
+  assert.match(output.next_step, /george-showroom \/tmp\/report\.html`\s+to open a fresh session/);
   assert.doesNotMatch(output.next_step, /--reopen/);
-  assert.doesNotMatch(output.next_step, /user ended this Lavish Editor session/);
+  assert.doesNotMatch(output.next_step, /user ended this George Showroom session/);
 });
 
 test("final user-ended feedback still reports a fatal artifact failure without reopening", () => {
@@ -1277,7 +1279,7 @@ test("final user-ended feedback still reports a fatal artifact failure without r
   });
 
   assert.match(output.next_step, /fatal artifact failure/);
-  assert.match(output.next_step, /confirm it renders without reopening this ended Lavish session/);
+  assert.match(output.next_step, /confirm it renders without reopening this ended George Showroom session/);
   assert.doesNotMatch(output.next_step, /--reopen/);
 });
 
@@ -1299,22 +1301,22 @@ test("final agent-ended feedback points a fatal artifact failure at a fresh sess
 
 test("poll wait messages tell watching agents the silence is normal", () => {
   const banner = pollWaitBannerText("/tmp/report.html");
-  assert.match(banner, /\[lavish-axi\]/);
+  assert.match(banner, /\[george-showroom\]/);
   assert.match(banner, /Long-polling for user feedback/);
   assert.match(banner, /stays silent/);
   assert.match(banner, /leave it running/i);
   assert.match(banner, /queued feedback is never lost/);
 
   const tick = pollWaitTickText(3 * 60_000);
-  assert.match(tick, /\[lavish-axi\]/);
+  assert.match(tick, /\[george-showroom\]/);
   assert.match(tick, /Still waiting for user feedback \(3m\)/);
   assert.match(tick, /leave this running/i);
 
   const interrupted = pollInterruptedText("/tmp/report.html");
-  assert.match(interrupted, /\[lavish-axi\]/);
+  assert.match(interrupted, /\[george-showroom\]/);
   assert.match(interrupted, /Poll interrupted/);
   assert.match(interrupted, /user may still be reviewing/);
-  assert.match(interrupted, /lavish-axi poll \/tmp\/report\.html/);
+  assert.match(interrupted, /george-showroom poll \/tmp\/report\.html/);
   assert.match(interrupted, /queued feedback is never lost/);
 });
 
@@ -1373,7 +1375,7 @@ test("shouldNarratePollWaitTicks heartbeats only in an interactive terminal", ()
 });
 
 test("spawned poll with piped stderr banners once and leaves re-run guidance when killed", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-poll-wait-test-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-poll-wait-test-`);
   const artifact = `${stateDir}/artifact.html`;
   await writeFile(artifact, "<html><body>hello</body></html>", "utf8");
   const server = await serve({ port: 0, stateFile: `${stateDir}/state.json`, version: VERSION });
@@ -1390,7 +1392,7 @@ test("spawned poll with piped stderr banners once and leaves re-run guidance whe
 
     const child = spawn(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "poll", artifact],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "poll", artifact],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         env: { ...process.env, LAVISH_AXI_STATE_DIR: stateDir, LAVISH_AXI_PORT: String(server.port) },
@@ -1434,7 +1436,7 @@ test("waiting next step reassures agents that re-running poll loses nothing", ()
     response: { status: "waiting" },
   });
 
-  assert.match(output.next_step, /lavish-axi poll \/tmp\/report\.html/);
+  assert.match(output.next_step, /george-showroom poll \/tmp\/report\.html/);
   assert.match(output.next_step, /without --timeout-ms/);
   assert.match(output.next_step, /queued feedback is never lost/);
 });
@@ -1489,7 +1491,7 @@ test("setup hooks creates a Copilot CLI hook that injects additional context", (
   assert.equal(updated.hooks.sessionStart[0].bash, "echo keep-me");
   assert.match(updated.hooks.sessionStart[1].bash, /additionalContext/);
   assert.match(updated.hooks.sessionStart[1].powershell, /additionalContext/);
-  assert.match(updated.hooks.sessionStart[1].bash, /lavish-axi/);
+  assert.match(updated.hooks.sessionStart[1].bash, /george-showroom/);
   assert.equal(updated.hooks.sessionStart[1].timeoutSec, 10);
 
   const [unchanged, unchangedFlag] = computeCopilotCliHookUpdate(updated, hook);
@@ -1497,8 +1499,109 @@ test("setup hooks creates a Copilot CLI hook that injects additional context", (
   assert.equal(unchanged, updated);
 });
 
-test("Copilot CLI ambient context script wraps lavish output as hook JSON", async () => {
-  const tempDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-copilot-hook-`);
+test("hook migration removes only legacy Lavish-managed entries", () => {
+  const settings = {
+    hooks: {
+      SessionStart: [
+        { matcher: "", hooks: [{ type: "command", command: "lavish-axi", timeout: 10 }] },
+        { matcher: "", hooks: [{ type: "command", command: "keep-me", timeout: 10 }] },
+      ],
+      session_start: [
+        { command: "/opt/lavish-axi" },
+        { command: "echo /opt/lavish-axi" },
+        { command: "printf /tmp/bin/lavish-axi.js" },
+        { command: "sh -c /tmp/lavish-axi/dist/cli.mjs" },
+        { command: "/bin/echo /opt/lavish-axi" },
+        { command: "/usr/bin/printf /tmp/bin/lavish-axi.js" },
+        { command: "/bin/sh -c /tmp/lavish-axi/dist/cli.mjs" },
+        { command: "C:\\Windows\\System32\\cmd.exe /c echo C:\\Tools\\lavish-axi" },
+        { command: 'sh -c "echo lavish-axi migration complete"' },
+        { command: "keep-legacy-shape" },
+      ],
+    },
+  };
+  const [updated, changed] = computeLegacySessionHookCleanup(settings);
+
+  assert.equal(changed, true);
+  assert.deepEqual(updated.hooks.SessionStart, [
+    { matcher: "", hooks: [{ type: "command", command: "keep-me", timeout: 10 }] },
+  ]);
+  assert.deepEqual(updated.hooks.session_start, [
+    { command: "echo /opt/lavish-axi" },
+    { command: "printf /tmp/bin/lavish-axi.js" },
+    { command: "sh -c /tmp/lavish-axi/dist/cli.mjs" },
+    { command: "/bin/echo /opt/lavish-axi" },
+    { command: "/usr/bin/printf /tmp/bin/lavish-axi.js" },
+    { command: "/bin/sh -c /tmp/lavish-axi/dist/cli.mjs" },
+    { command: "C:\\Windows\\System32\\cmd.exe /c echo C:\\Tools\\lavish-axi" },
+    { command: 'sh -c "echo lavish-axi migration complete"' },
+    { command: "keep-legacy-shape" },
+  ]);
+});
+
+test("hook migration recognizes an existing legacy executable path containing spaces", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "george-showroom legacy hook "));
+  const legacyExecutable = path.join(tempDir, "lavish-axi");
+  try {
+    await writeFile(legacyExecutable, "#!/usr/bin/env node\n", "utf8");
+    const settings = { hooks: { session_start: [{ command: legacyExecutable }, { command: "keep-me" }] } };
+    const [updated, changed] = computeLegacySessionHookCleanup(settings);
+
+    assert.equal(changed, true);
+    assert.deepEqual(updated.hooks.session_start, [{ command: "keep-me" }]);
+  } finally {
+    await rm(tempDir, { force: true, recursive: true });
+  }
+});
+
+test("Copilot hook migration replaces legacy managed entries but preserves unrelated hooks", () => {
+  const hook = createCopilotCliSessionStartHook();
+  const legacyHook = createLegacyCopilotCliSessionStartHook();
+  const reorderedLegacyHook = {
+    timeoutSec: legacyHook.timeoutSec,
+    powershell: legacyHook.powershell,
+    bash: legacyHook.bash,
+    type: legacyHook.type,
+  };
+  const [updated] = computeCopilotCliHookUpdate(
+    {
+      version: 1,
+      hooks: {
+        sessionStart: [
+          { type: "command", bash: "lavish-axi" },
+          legacyHook,
+          reorderedLegacyHook,
+          { ...reorderedLegacyHook, note: "user-owned extension" },
+          { type: "command", bash: "echo /opt/lavish-axi" },
+          { type: "command", bash: "/bin/echo /opt/lavish-axi" },
+          { type: "command", bash: "/usr/bin/printf /tmp/bin/lavish-axi.js" },
+          { type: "command", bash: "/bin/sh -c /tmp/lavish-axi/dist/cli.mjs" },
+          { type: "command", bash: "C:\\Windows\\System32\\cmd.exe /c echo C:\\Tools\\lavish-axi" },
+          { type: "command", bash: "echo additionalContext AXI ambient context: lavish-axi" },
+          { type: "command", bash: "echo keep-note-about-lavish-axi" },
+          { type: "command", bash: "echo keep-me" },
+        ],
+      },
+    },
+    hook,
+  );
+
+  assert.equal(updated.hooks.sessionStart.length, 10);
+  assert.equal(updated.hooks.sessionStart[0].note, "user-owned extension");
+  assert.equal(updated.hooks.sessionStart[1].bash, "echo /opt/lavish-axi");
+  assert.equal(updated.hooks.sessionStart[2].bash, "/bin/echo /opt/lavish-axi");
+  assert.equal(updated.hooks.sessionStart[3].bash, "/usr/bin/printf /tmp/bin/lavish-axi.js");
+  assert.equal(updated.hooks.sessionStart[4].bash, "/bin/sh -c /tmp/lavish-axi/dist/cli.mjs");
+  assert.equal(updated.hooks.sessionStart[5].bash, "C:\\Windows\\System32\\cmd.exe /c echo C:\\Tools\\lavish-axi");
+  assert.equal(updated.hooks.sessionStart[6].bash, "echo additionalContext AXI ambient context: lavish-axi");
+  assert.equal(updated.hooks.sessionStart[7].bash, "echo keep-note-about-lavish-axi");
+  assert.equal(updated.hooks.sessionStart[8].bash, "echo keep-me");
+  assert.match(updated.hooks.sessionStart[9].bash, /george-showroom/);
+  assert.doesNotMatch(JSON.stringify(updated), /"bash":"lavish-axi"/);
+});
+
+test("Copilot CLI ambient context script wraps George Showroom output as hook JSON", async () => {
+  const tempDir = await mkdtemp(`${os.tmpdir()}/george-showroom-copilot-hook-`);
   try {
     const fakeCli = path.join(tempDir, "fake-lavish.js");
     await writeFile(fakeCli, 'console.log("sessions: []");\n', "utf8");
@@ -1509,7 +1612,7 @@ test("Copilot CLI ambient context script wraps lavish output as hook JSON", asyn
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const output = JSON.parse(result.stdout);
-    assert.match(output.additionalContext, /## AXI ambient context: lavish-axi/);
+    assert.match(output.additionalContext, /## AXI ambient context: george-showroom/);
     assert.match(output.additionalContext, /sessions: \[\]/);
   } finally {
     await rm(tempDir, { force: true, recursive: true });
@@ -1517,12 +1620,12 @@ test("Copilot CLI ambient context script wraps lavish output as hook JSON", asyn
 });
 
 test("setup hooks installs agent session hooks explicitly", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-setup-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-setup-home-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-setup-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-setup-home-`);
   try {
     const result = spawnSync(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "setup", "hooks"],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "setup", "hooks"],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         encoding: "utf8",
@@ -1536,9 +1639,9 @@ test("setup hooks installs agent session hooks explicitly", async () => {
     assert.match(result.stdout, /GitHub Copilot CLI/);
     assert.match(result.stdout, /Restart your agent session/);
     assert.ok(existsSync(`${homeDir}/.claude/settings.json`));
-    assert.ok(existsSync(`${homeDir}/.copilot/hooks/lavish-axi.json`));
+    assert.ok(existsSync(`${homeDir}/.copilot/hooks/george-showroom.json`));
 
-    const copilotHook = JSON.parse(await readFile(`${homeDir}/.copilot/hooks/lavish-axi.json`, "utf8"));
+    const copilotHook = JSON.parse(await readFile(`${homeDir}/.copilot/hooks/george-showroom.json`, "utf8"));
     assert.equal(copilotHook.version, 1);
     assert.equal(copilotHook.hooks.sessionStart.length, 1);
     assert.match(copilotHook.hooks.sessionStart[0].bash, /additionalContext/);
@@ -1549,16 +1652,71 @@ test("setup hooks installs agent session hooks explicitly", async () => {
   }
 });
 
+test("the lavish-axi compatibility entrypoint installs George Showroom hooks and migrates legacy registrations", async () => {
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-alias-setup-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-alias-setup-home-`);
+  try {
+    await mkdir(`${homeDir}/.claude`, { recursive: true });
+    await mkdir(`${homeDir}/.copilot/hooks`, { recursive: true });
+    await writeFile(
+      `${homeDir}/.claude/settings.json`,
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            { matcher: "", hooks: [{ type: "command", command: "lavish-axi", timeout: 10 }] },
+            { matcher: "", hooks: [{ type: "command", command: "keep-me", timeout: 10 }] },
+          ],
+        },
+      }),
+    );
+    await writeFile(
+      `${homeDir}/.copilot/hooks/lavish-axi.json`,
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          sessionStart: [
+            { type: "command", bash: "lavish-axi" },
+            { type: "command", bash: "echo keep" },
+          ],
+        },
+      }),
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "setup", "hooks"],
+      {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        encoding: "utf8",
+        env: setupHooksEnv(homeDir, stateDir),
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const claude = JSON.parse(await readFile(`${homeDir}/.claude/settings.json`, "utf8"));
+    assert.equal(JSON.stringify(claude).includes("lavish-axi"), false);
+    assert.equal(JSON.stringify(claude).includes("george-showroom"), true);
+    assert.equal(JSON.stringify(claude).includes("keep-me"), true);
+    const copilot = JSON.parse(await readFile(`${homeDir}/.copilot/hooks/george-showroom.json`, "utf8"));
+    assert.equal(JSON.stringify(copilot).includes("lavish-axi"), false);
+    assert.equal(JSON.stringify(copilot).includes("echo keep"), true);
+    assert.equal(existsSync(`${homeDir}/.copilot/hooks/lavish-axi.json`), false);
+  } finally {
+    await rm(stateDir, { force: true, recursive: true });
+    await rm(homeDir, { force: true, recursive: true });
+  }
+});
+
 test("setup hooks exits with an error when hook installation fails", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-setup-fail-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-setup-fail-home-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-setup-fail-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-setup-fail-home-`);
   try {
     await mkdir(`${homeDir}/.claude`, { recursive: true });
     await writeFile(`${homeDir}/.claude/settings.json`, "{ invalid json", "utf8");
 
     const result = spawnSync(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "setup", "hooks"],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "setup", "hooks"],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         encoding: "utf8",
@@ -1588,7 +1746,7 @@ function setupPluginEnv(homeDir, stateDir, pathDir) {
 function runSetupPlugin(homeDir, stateDir, pathDir) {
   return spawnSync(
     process.execPath,
-    [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "setup", "plugin"],
+    [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "setup", "plugin"],
     {
       cwd: fileURLToPath(new URL("..", import.meta.url)),
       encoding: "utf8",
@@ -1607,12 +1765,13 @@ if (command === "plugins list") {
   if (options.invalidList) {
     process.stdout.write("not json\\n");
   } else {
-    const records = [{ kind: "plugin", name: "lavish-axi-tools", source: "direct" }];
+    const records = [{ kind: "plugin", name: "george-showroom-tools", source: "direct" }];
     if (options.installedSource && fs.existsSync(options.installedSource)) {
       records.push(options.listSourcePath
-        ? { kind: "plugin", name: "lavish-axi", sourcePath: fs.readFileSync(options.installedSource, "utf8") }
-        : { kind: "plugin", name: "lavish-axi", source: "direct" });
+        ? { kind: "plugin", name: "george-showroom", sourcePath: fs.readFileSync(options.installedSource, "utf8") }
+        : { kind: "plugin", name: "george-showroom", source: "direct" });
     }
+    if (options.legacyInstalled) records.push({ kind: "plugin", name: "lavish-axi", source: "direct" });
     process.stdout.write(JSON.stringify(records));
   }
   process.exit(0);
@@ -1626,11 +1785,15 @@ if (command === "plugin install") {
   if (options.installedSource) fs.writeFileSync(options.installedSource, pluginRoot);
   if (options.copilotConfig) {
     fs.writeFileSync(options.copilotConfig, JSON.stringify({
-      installedPlugins: [{ name: "lavish-axi", source: { source: "local", path: pluginRoot } }],
+      installedPlugins: [{ name: "george-showroom", source: { source: "local", path: pluginRoot } }],
     }));
   }
   if (options.installLog) fs.appendFileSync(options.installLog, "install\\n");
   process.exit(0);
+}
+if (command === "plugin uninstall" && args[2] === "lavish-axi") {
+  if (options.uninstallLog) fs.appendFileSync(options.uninstallLog, "lavish-axi\\n");
+  process.exit(options.uninstallFails ? 1 : 0);
 }
 process.exit(1);
 `;
@@ -1647,26 +1810,46 @@ process.exit(1);
 }
 
 test("setup plugin registers the installed package in the clients that are present", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-home-`);
-  const pathDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-path-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-path-`);
   try {
     await mkdir(`${homeDir}/.cursor`, { recursive: true });
 
     const result = runSetupPlugin(homeDir, stateDir, pathDir);
 
     assert.equal(result.status, 0, result.stderr || result.stdout);
-    assert.match(result.stdout, /name: lavish-axi/);
+    assert.match(result.stdout, /name: george-showroom/);
     assert.match(result.stdout, /cursor,registered/);
     // No VS Code settings and no copilot binary in this environment.
     assert.match(result.stdout, /vscode,absent/);
     assert.match(result.stdout, /copilot,absent/);
 
     // The registered slot points at the package root, which is where plugin.json lives.
-    const linked = await realpath(`${homeDir}/.cursor/plugins/local/lavish-axi`);
+    const linked = await realpath(`${homeDir}/.cursor/plugins/local/george-showroom`);
     assert.equal(linked, await realpath(fileURLToPath(new URL("..", import.meta.url))));
     assert.ok(existsSync(`${linked}/plugin.json`));
-    assert.ok(existsSync(`${linked}/skills/lavish/SKILL.md`));
+    assert.ok(existsSync(`${linked}/skills/george-showroom/SKILL.md`));
+  } finally {
+    await rm(stateDir, { force: true, recursive: true });
+    await rm(homeDir, { force: true, recursive: true });
+    await rm(pathDir, { force: true, recursive: true });
+  }
+});
+
+test("setup plugin migrates an attributable Copilot Lavish registration after installing George Showroom", async () => {
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-migrate-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-migrate-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-migrate-path-`);
+  const uninstallLog = path.join(homeDir, "uninstall.log");
+  try {
+    await writeCopilotCommandStub(pathDir, { legacyInstalled: true, uninstallLog });
+    const result = runSetupPlugin(homeDir, stateDir, pathDir);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /copilot,registered/);
+    assert.match(result.stdout, /migrated lavish-axi registration/);
+    assert.equal(await readFile(uninstallLog, "utf8"), "lavish-axi\n");
   } finally {
     await rm(stateDir, { force: true, recursive: true });
     await rm(homeDir, { force: true, recursive: true });
@@ -1675,9 +1858,9 @@ test("setup plugin registers the installed package in the clients that are prese
 });
 
 test("setup plugin registers VS Code without disturbing existing settings", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-vs-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-vs-home-`);
-  const pathDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-vs-path-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-vs-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-vs-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-vs-path-`);
   const settingsFile = resolveVsCodeSettingsFile({}, homeDir);
   try {
     await mkdir(path.dirname(settingsFile), { recursive: true });
@@ -1706,9 +1889,9 @@ test("setup plugin registers VS Code without disturbing existing settings", asyn
 });
 
 test("setup plugin creates VS Code settings for a fresh installation", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-vs-fresh-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-vs-fresh-home-`);
-  const pathDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-vs-fresh-path-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-vs-fresh-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-vs-fresh-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-vs-fresh-path-`);
   const settingsFile = resolveVsCodeSettingsFile({}, homeDir);
   try {
     await mkdir(path.dirname(settingsFile), { recursive: true });
@@ -1729,9 +1912,9 @@ test("setup plugin creates VS Code settings for a fresh installation", async () 
 });
 
 test("setup plugin leaves unparseable VS Code settings alone", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-jsonc-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-jsonc-home-`);
-  const pathDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-jsonc-path-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-jsonc-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-jsonc-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-jsonc-path-`);
   const settingsFile = resolveVsCodeSettingsFile({}, homeDir);
   const original = '{\n  // VS Code settings allow comments\n  "editor.fontSize": 13,\n}\n';
   try {
@@ -1751,9 +1934,9 @@ test("setup plugin leaves unparseable VS Code settings alone", async () => {
 });
 
 test("setup plugin repairs Copilot registration without trusting list text", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-home-`);
-  const pathDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-path-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-path-`);
   const installedSource = path.join(homeDir, "copilot-installed-source");
   const installLog = path.join(homeDir, "copilot-install-log");
   const copilotConfig = path.join(homeDir, ".copilot", "config.json");
@@ -1776,10 +1959,10 @@ test("setup plugin repairs Copilot registration without trusting list text", asy
     assert.equal(await realpath(await readFile(installedSource, "utf8")), pluginRoot);
     assert.equal(await readFile(installLog, "utf8"), "install\n");
 
-    await writeFile(installedSource, "/stale/lavish-axi");
+    await writeFile(installedSource, "/stale/george-showroom");
     await writeFile(
       copilotConfig,
-      '{"installedPlugins":[{"name":"lavish-axi","source":{"source":"local","path":"/stale/lavish-axi"}}]}',
+      '{"installedPlugins":[{"name":"george-showroom","source":{"source":"local","path":"/stale/george-showroom"}}]}',
     );
     const repaired = runSetupPlugin(homeDir, stateDir, pathDir);
 
@@ -1795,11 +1978,11 @@ test("setup plugin repairs Copilot registration without trusting list text", asy
 });
 
 test("setup plugin preserves Copilot registration when replacement fails", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-failure-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-failure-home-`);
-  const pathDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-failure-path-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-failure-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-failure-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-failure-path-`);
   const installedSource = path.join(homeDir, "copilot-installed-source");
-  const originalSource = "/working/lavish-axi";
+  const originalSource = "/working/george-showroom";
   try {
     await writeFile(installedSource, originalSource);
     await writeCopilotCommandStub(pathDir, { installedSource, listSourcePath: true, installFails: true });
@@ -1817,9 +2000,9 @@ test("setup plugin preserves Copilot registration when replacement fails", async
 });
 
 test("setup plugin does not install when Copilot records are invalid", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-invalid-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-invalid-home-`);
-  const pathDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-copilot-invalid-path-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-invalid-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-invalid-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-copilot-invalid-path-`);
   const installLog = path.join(homeDir, "copilot-install-log");
   try {
     await writeCopilotCommandStub(pathDir, { invalidList: true, installLog });
@@ -1837,14 +2020,14 @@ test("setup plugin does not install when Copilot records are invalid", async () 
 });
 
 test("setup plugin isolates a client it cannot register from the ones it can", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-iso-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-iso-home-`);
-  const pathDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-plugin-iso-path-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-iso-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-iso-home-`);
+  const pathDir = await mkdtemp(`${os.tmpdir()}/george-showroom-plugin-iso-path-`);
   const settingsFile = resolveVsCodeSettingsFile({}, homeDir);
   try {
     // A real directory in Cursor's slot is unregisterable - the same reported (not thrown)
     // path a Windows box without Developer Mode takes when link creation is refused.
-    const occupied = `${homeDir}/.cursor/plugins/local/lavish-axi`;
+    const occupied = `${homeDir}/.cursor/plugins/local/george-showroom`;
     await mkdir(occupied, { recursive: true });
     await writeFile(`${occupied}/keep.txt`, "user content", "utf8");
     await mkdir(path.dirname(settingsFile), { recursive: true });
@@ -1867,12 +2050,12 @@ test("setup plugin isolates a client it cannot register from the ones it can", a
 });
 
 test("setup rejects an unknown action and names both supported ones", async () => {
-  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-setup-unknown-state-`);
-  const homeDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-setup-unknown-home-`);
+  const stateDir = await mkdtemp(`${os.tmpdir()}/george-showroom-setup-unknown-state-`);
+  const homeDir = await mkdtemp(`${os.tmpdir()}/george-showroom-setup-unknown-home-`);
   try {
     const result = spawnSync(
       process.execPath,
-      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "setup", "everything"],
+      [fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)), "setup", "everything"],
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         encoding: "utf8",
@@ -1914,29 +2097,37 @@ test("server spawn options can persist detached server output to a log fd", () =
 });
 
 test("server entry resolves to a node-executable script that actually invokes run()", () => {
-  // Running from source, the entry must be `bin/lavish-axi.js` (the only file in the
+  // Running from source, the entry must be `bin/george-showroom.js` (the only file in the
   // source tree that calls run() on import). In the published bundle only `dist/cli.mjs`
   // ships - it embeds the bin wrapper so it self-invokes. Either way, spawning the entry
   // with `node <entry> server` must boot the server, not silently load the module and exit.
   const entry = resolveServerEntry();
   assert.ok(existsSync(entry), `server entry must exist on disk, got: ${entry}`);
-  // From source: bin/lavish-axi.js is present and preferred.
-  assert.equal(entry, fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)));
+  // From source: bin/george-showroom.js is present and preferred.
+  assert.equal(entry, fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url)));
 });
 
 test("local built CLI opens force a server restart while source and installed runs do not", () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
 
   assert.equal(shouldForceRestartForLocalBuild(`${root}/dist/cli.mjs`, true), true);
-  assert.equal(shouldForceRestartForLocalBuild(`${root}/bin/lavish-axi.js`, true), false);
-  assert.equal(shouldForceRestartForLocalBuild("/usr/local/lib/node_modules/lavish-axi/dist/cli.mjs", false), false);
+  assert.equal(shouldForceRestartForLocalBuild(`${root}/bin/george-showroom.js`, true), false);
+  assert.equal(
+    shouldForceRestartForLocalBuild("/usr/local/lib/node_modules/george-showroom/dist/cli.mjs", false),
+    false,
+  );
 });
 
 test("shouldRestartServer reuses a server running the same version", () => {
-  assert.equal(shouldRestartServer("0.1.4", { ok: true, version: "0.1.4" }), false);
+  assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "george-showroom", version: "0.1.4" }), false);
 });
 
-test("shouldRestartServer restarts same-version Lavish servers when forced", () => {
+test("shouldRestartServer replaces a same-version upstream Lavish server", () => {
+  assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.4" }), true);
+});
+
+test("shouldRestartServer restarts same-version George Showroom servers when forced", () => {
+  assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "george-showroom", version: "0.1.4" }, true), true);
   assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.4" }, true), true);
   assert.equal(shouldRestartServer("0.1.4", { ok: true, app: "other", version: "0.1.4" }, true), false);
 });
@@ -1964,16 +2155,18 @@ test("shouldKillProcessOnPort does not kill unidentified health responders", () 
   assert.equal(shouldKillProcessOnPort("0.1.4", { ok: true, app: "other", version: "0.1.3" }), false);
 });
 
-test("shouldKillProcessOnPort kills pre-handshake Lavish servers after shutdown fails", () => {
+test("shouldKillProcessOnPort kills pre-handshake George Showroom servers after shutdown fails", () => {
   assert.equal(shouldKillProcessOnPort("0.1.4", { ok: true }), true);
 });
 
-test("shouldKillProcessOnPort only kills Lavish servers with a mismatched version", () => {
+test("shouldKillProcessOnPort kills mismatched George Showroom and all attributable upstream servers", () => {
+  assert.equal(shouldKillProcessOnPort("0.1.4", { ok: true, app: "george-showroom", version: "0.1.3" }), true);
+  assert.equal(shouldKillProcessOnPort("0.1.4", { ok: true, app: "george-showroom", version: "0.1.4" }), false);
   assert.equal(shouldKillProcessOnPort("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.3" }), true);
-  assert.equal(shouldKillProcessOnPort("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.4" }), false);
+  assert.equal(shouldKillProcessOnPort("0.1.4", { ok: true, app: "lavish-axi", version: "0.1.4" }), true);
 });
 
-test("shutdownServerOnPort kills pre-handshake Lavish servers when shutdown does not free the port", async () => {
+test("shutdownServerOnPort kills pre-handshake George Showroom servers when shutdown does not free the port", async () => {
   let shutdowns = 0;
   let kills = 0;
   const portFreeResults = [false, true];
@@ -2035,7 +2228,7 @@ test("open can resume a session without opening another browser window", () => {
   assert.doesNotMatch(getCommandHelp("playbook"), new RegExp(`${"di"}ff, input`));
   assert.doesNotMatch(getCommandHelp("playbook"), /interactive/);
   assert.match(getCommandHelp("design"), /DaisyUI/);
-  assert.match(getCommandHelp("design"), /lavish-axi design/);
+  assert.match(getCommandHelp("design"), /george-showroom design/);
   assert.match(getCommandHelp("design"), /portable/);
   assert.ok(getCommandHelp("design").includes(DESIGN_PRIORITY_RULE), "design help embeds the single-sourced rule");
   assert.match(getCommandHelp("design"), /fallback, not the default/i);
@@ -2049,21 +2242,21 @@ test("polling a file without an active session tells the agent to open it first"
     (error) => {
       assert.ok(error instanceof AxiError);
       assert.equal(error.code, "NOT_FOUND");
-      assert.match(error.message, /No active Lavish Editor session/);
-      assert.ok(error.suggestions.some((item) => item.includes("lavish-axi /tmp/report.html")));
+      assert.match(error.message, /No active George Showroom session/);
+      assert.ok(error.suggestions.some((item) => item.includes("george-showroom /tmp/report.html")));
       return true;
     },
   );
 });
 
-test("network fetch failures become structured Lavish server errors", async () => {
+test("network fetch failures become structured George Showroom server errors", async () => {
   await assert.rejects(
     () => fetchJson("http://127.0.0.1:1/api/poll"),
     (error) => {
       assert.ok(error instanceof AxiError);
       assert.equal(error.code, "SERVER_ERROR");
-      assert.match(error.message, /Lavish Editor server connection failed/);
-      assert.ok(error.suggestions.some((item) => item.includes("lavish-axi server --verbose")));
+      assert.match(error.message, /George Showroom server connection failed/);
+      assert.ok(error.suggestions.some((item) => item.includes("george-showroom server --verbose")));
       return true;
     },
   );
@@ -2115,7 +2308,7 @@ test("fetchJson reports interrupted response body failures without retrying", as
       (error) => {
         assert.ok(error instanceof AxiError);
         assert.equal(error.code, "SERVER_ERROR");
-        assert.match(error.message, /Lavish Editor poll response was interrupted/);
+        assert.match(error.message, /George Showroom poll response was interrupted/);
         return true;
       },
     );
@@ -2126,7 +2319,7 @@ test("fetchJson reports interrupted response body failures without retrying", as
 });
 
 test("stop command shuts down the running server on the configured port", async () => {
-  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-stop-test-`);
+  const dir = await mkdtemp(`${os.tmpdir()}/george-showroom-stop-test-`);
   const server = await serve({ port: 0, stateFile: `${dir}/state.json`, version: "9.9.9-test" });
   try {
     const output = await stopCommand(["--port", String(server.port)]);
@@ -2140,7 +2333,7 @@ test("stop command shuts down the running server on the configured port", async 
 });
 
 test("stop command reports when no server is running", async () => {
-  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-stop-test-`);
+  const dir = await mkdtemp(`${os.tmpdir()}/george-showroom-stop-test-`);
   try {
     // Bind then release a port so we know nothing is listening on it.
     const probe = await serve({ port: 0, stateFile: `${dir}/state.json` });

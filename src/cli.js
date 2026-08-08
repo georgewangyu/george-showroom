@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +20,7 @@ import {
   computeVsCodePluginLocationsUpdate,
   linkCursorLocalPlugin,
   readPluginManifest,
+  removeLegacyCursorPluginLinks,
   resolveCursorLocalPluginsDir,
   resolvePluginRoot,
   resolveVsCodeSettingsFile,
@@ -32,12 +33,13 @@ import { canonicalFile, sessionKey, SessionStore } from "./session-store.js";
 import { initDefaultTelemetry } from "./telemetry.js";
 
 const COMMANDS = new Set(["open", "poll", "end", "stop", "server", "playbook", "design", "setup", "export", "share"]);
+const SERVER_APP_IDS = new Set(["george-showroom", "lavish-axi"]);
 // SDK-reserved built-ins (e.g. `update`) must reach runAxiCli untouched; otherwise
 // the bare-arg normalization below would rewrite them into the hidden `open` command.
 const RESERVED = new Set(RESERVED_COMMANDS);
 const DESCRIPTION =
-  "Lavish Editor helps agents turn rich HTML artifacts into collaborative human review surfaces. Whenever you are about to give user a complex response that will be easier to understand via a rich / interactive page, consider using Lavish Editor. " +
-  "First generate an interactive HTML artifact according to user request, then run `lavish-axi <html-file>` so the user can visually review it, annotate elements or selected text, queue prompts, and send feedback back through `lavish-axi poll`.";
+  "George Showroom helps agents turn rich HTML artifacts into collaborative human review surfaces. Whenever you are about to give user a complex response that will be easier to understand via a rich / interactive page, consider using George Showroom. " +
+  "First generate an interactive HTML artifact according to user request, then run `george-showroom <html-file>` so the user can visually review it, annotate elements or selected text, queue prompts, and send feedback back through `george-showroom poll`.";
 export const POLL_WAKE_PATH_RULES = Object.freeze([
   "Keep the poll in the foreground by default and let it return the feedback directly to the agent.",
   "A background poll is allowed only through a harness-native tracked background-job facility whose completion result is guaranteed to resume or notify the same agent.",
@@ -89,7 +91,7 @@ export async function run(argv) {
   const isTopLevelHelp = argv.length === 1 && argv[0] === "--help";
   const command = telemetryCommandName(argv);
   const telemetry = initDefaultTelemetry({
-    app: "lavish-axi",
+    app: "george-showroom",
     version: VERSION,
     platform: process.platform,
     arch: process.arch,
@@ -103,7 +105,7 @@ export async function run(argv) {
       topLevelHelp: createTopLevelHelp({ agent }),
       home: async () =>
         createHomeOutput({
-          bin: process.argv[1] || "lavish-axi",
+          bin: process.argv[1] || "george-showroom",
           sessions: isTopLevelHelp ? [] : await visibleSessions(),
           includeSessions: !isTopLevelHelp,
           agent,
@@ -183,18 +185,18 @@ export function createHomeOutput({ bin, sessions, includeSessions = true, agent 
     ],
     playbooks: listPlaybooks(),
     help: [
-      "Run `lavish-axi <html-file>` to open or resume a Lavish Editor session. If the user explicitly ended the session from the browser, this refuses to reopen it and explains why instead of reopening uninvited - pass `--reopen` only when the user asks for further review or something important needs their visual attention",
+      "Run `george-showroom <html-file>` to open or resume a George Showroom session. If the user explicitly ended the session from the browser, this refuses to reopen it and explains why instead of reopening uninvited - pass `--reopen` only when the user asks for further review or something important needs their visual attention",
       "Unless the user specifies another location, create HTML artifacts in the current working directory under `.lavish/`",
-      "Lavish serves the html file through a local express.js server. If your html needs to reference other filesystem assets such as images, CSS, fonts, and local scripts, copy them into the same directory as the HTML file, then reference them with relative paths from that directory. Never prepend `/` to those asset paths - root paths won't work",
-      `Run \`lavish-axi poll <html-file>\` to wait for user feedback. It long-polls and stays silent until the user sends feedback or ends the session, so leave it running - never kill it. Detected layout issues never return this poll: the browser files them in the user's Layout issues inbox in the Lavish top bar, and they arrive as an ordinary tag "layout-warnings" prompt only when the user selects them and queues the fixes. Never edit the artifact to chase a layout issue the user has not queued. The only exception is a fatal artifact_failures response, which means the review surface itself could not be used. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}`,
+      "George Showroom serves the html file through a local express.js server. If your html needs to reference other filesystem assets such as images, CSS, fonts, and local scripts, copy them into the same directory as the HTML file, then reference them with relative paths from that directory. Never prepend `/` to those asset paths - root paths won't work",
+      `Run \`george-showroom poll <html-file>\` to wait for user feedback. It long-polls and stays silent until the user sends feedback or ends the session, so leave it running - never kill it. Detected layout issues never return this poll: the browser files them in the user's Layout issues inbox in the George Showroom top bar, and they arrive as an ordinary tag "layout-warnings" prompt only when the user selects them and queues the fixes. Never edit the artifact to chase a layout issue the user has not queued. The only exception is a fatal artifact_failures response, which means the review surface itself could not be used. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}`,
       'Rendered Mermaid diagrams in `.mermaid` containers become embedded, editable Excalidraw whiteboards in the browser (click a diagram to unlock editing; a Fullscreen action opens it over the whole viewport) - flowchart, sequence, class, ER, and state diagrams convert to editable shapes; other types embed as an image to draw on. Scenes autosave locally; when a reload detects a changed Mermaid source, the reviewer explicitly chooses to re-convert and discard saved edits or keep editing the saved scene. Standalone and exported copies still render plain Mermaid. Queue feedback adds a prompt to the Conversation panel; when the user sends it, poll returns a tag "whiteboard" prompt carrying a bounded edit summary plus local scenePath (.excalidraw JSON) and previewPath (PNG) files - read the summary first, open the files only when needed, then apply the edits by updating the Mermaid source in the artifact (never try to write the scene back)',
-      "Run `lavish-axi end <html-file>` to end a session as the agent - ending it this way still allows a plain reopen later. When the user ends it from the browser instead, a later `lavish-axi <html-file>` refuses to reopen it without `--reopen`",
-      "Run `lavish-axi export <html-file> [--out <path>]` to write a portable copy of the artifact - one HTML file with its LOCAL assets inlined - so it opens with no Lavish server and no sibling files. Remote CDN/font references are left as links, so it needs network to render those. Users can also export from the browser chrome's overflow menu",
-      "Run `lavish-axi share <html-file> [--password <pw>] [--token <t>]` to publish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of Lavish, and get back a visitable URL. Shares are PUBLIC by default, so anyone with the link can open them. Pass --password to publish a PRIVATE password-protected page; viewers must supply the password to view. Local assets are inlined; remote refs load over the network. It returns the url plus a secret update_key for managing the page later. Use --token or LAVISH_AXI_HTML_APP_TOKEN only when you have an optional bearer token; it is never required. Users can also publish from the browser chrome's overflow menu",
-      "Run `lavish-axi stop` to shut down the background server (it also self-stops when idle or after the last session ends with nothing connected)",
-      `Run \`lavish-axi playbook <playbook_id>\` for focused artifact guidance. ${PLAYBOOK_ROUTER_HELP}`,
+      "Run `george-showroom end <html-file>` to end a session as the agent - ending it this way still allows a plain reopen later. When the user ends it from the browser instead, a later `george-showroom <html-file>` refuses to reopen it without `--reopen`",
+      "Run `george-showroom export <html-file> [--out <path>]` to write a portable copy of the artifact - one HTML file with its LOCAL assets inlined - so it opens with no George Showroom server and no sibling files. Remote CDN/font references are left as links, so it needs network to render those. Users can also export from the browser chrome's overflow menu",
+      "Run `george-showroom share <html-file> [--password <pw>] [--token <t>]` to publish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of George Showroom, and get back a visitable URL. Shares are PUBLIC by default, so anyone with the link can open them. Pass --password to publish a PRIVATE password-protected page; viewers must supply the password to view. Local assets are inlined; remote refs load over the network. It returns the url plus a secret update_key for managing the page later. Use --token or LAVISH_AXI_HTML_APP_TOKEN only when you have an optional bearer token; it is never required. Users can also publish from the browser chrome's overflow menu",
+      "Run `george-showroom stop` to shut down the background server (it also self-stops when idle or after the last session ends with nothing connected)",
+      `Run \`george-showroom playbook <playbook_id>\` for focused artifact guidance. ${PLAYBOOK_ROUTER_HELP}`,
       DESIGN_SYSTEM_HINT,
-      "Use lavish-axi when the user asks for a visual artifact, HTML explainer, interactive prototype, review surface, product or technical plan, comparison, report, or browser-based feedback loop",
+      "Use george-showroom when the user asks for a visual artifact, HTML explainer, interactive prototype, review surface, product or technical plan, comparison, report, or browser-based feedback loop",
     ],
   };
 }
@@ -204,14 +206,14 @@ export function createPlaybookOutput(args) {
   if (!id) {
     return {
       playbooks: listPlaybooks(),
-      help: ["Run `lavish-axi playbook <playbook_id>` for focused artifact guidance", PLAYBOOK_ROUTER_HELP],
+      help: ["Run `george-showroom playbook <playbook_id>` for focused artifact guidance", PLAYBOOK_ROUTER_HELP],
     };
   }
 
   const playbook = findPlaybook(id);
   if (!playbook) {
     throw new AxiError(`Unknown playbook: ${id}`, "VALIDATION_ERROR", [
-      `Run \`lavish-axi playbook\` to list known IDs: ${playbookIds().join(", ")}`,
+      `Run \`george-showroom playbook\` to list known IDs: ${playbookIds().join(", ")}`,
     ]);
   }
 
@@ -221,25 +223,25 @@ export function createPlaybookOutput(args) {
 export function createOpenOutput({ file, url, status, agent = "generic" }) {
   return {
     session: { file, url, status },
-    next_step: `Do not respond to the user just yet. Now you must run \`lavish-axi poll ${file}\`. This command long-polls until the user sends feedback or ends the session, and it stays silent the whole time - that is normal, never kill it. Layout issues the browser detects do not return this poll; they wait in the user's Layout issues inbox until the user queues them, then arrive as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use. ${pollExecutionGuidance({ agent })} After applying feedback, run \`lavish-axi poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms to show your response in Lavish Editor and wait for more feedback. If the user ends the session, stop polling and do not reopen it by re-running \`lavish-axi ${file}\` unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`lavish-axi ${file} --reopen\`.`,
+    next_step: `Do not respond to the user just yet. Now you must run \`george-showroom poll ${file}\`. This command long-polls until the user sends feedback or ends the session, and it stays silent the whole time - that is normal, never kill it. Layout issues the browser detects do not return this poll; they wait in the user's Layout issues inbox until the user queues them, then arrive as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use. ${pollExecutionGuidance({ agent })} After applying feedback, run \`george-showroom poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms to show your response in George Showroom and wait for more feedback. If the user ends the session, stop polling and do not reopen it by re-running \`george-showroom ${file}\` unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`george-showroom ${file} --reopen\`.`,
   };
 }
 
-// Shown when a plain `lavish-axi <file>` targets a session the user explicitly ended from the
+// Shown when a plain `george-showroom <file>` targets a session the user explicitly ended from the
 // browser. Reviving it silently would reopen a browser window the human deliberately closed, so
 // this refuses and requires the explicit --reopen opt-in instead of erroring - the session
 // staying closed is the correct, idempotent outcome unless the agent has a real reason to reopen.
 export function createUserEndedOpenOutput({ file, url }) {
   return {
     session: { file, url, status: "user-ended" },
-    next_step: `The user explicitly ended this Lavish Editor session from the browser, so \`lavish-axi ${file}\` did not reopen it. Do not reopen unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`lavish-axi ${file} --reopen\`.`,
+    next_step: `The user explicitly ended this George Showroom session from the browser, so \`george-showroom ${file}\` did not reopen it. Do not reopen unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`george-showroom ${file} --reopen\`.`,
   };
 }
 
 async function openCommand(args) {
   const file = firstPositionalArg(args);
   if (!file) {
-    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi <html-file>`"]);
+    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `george-showroom <html-file>`"]);
   }
   await assertHtmlFile(file);
   const absolute = await canonicalFile(file);
@@ -273,7 +275,7 @@ export function shouldOpenBrowser(args, env) {
 async function pollCommand(args) {
   const file = firstPositionalArg(args, ["--agent-reply", "--timeout-ms"]);
   if (!file) {
-    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi poll <html-file>`"]);
+    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `george-showroom poll <html-file>`"]);
   }
   const absolute = await canonicalFile(file);
   const baseUrl = await ensureServer();
@@ -323,21 +325,21 @@ async function pollCommand(args) {
 
 export function pollWaitBannerText(file) {
   return (
-    `[lavish-axi] Long-polling for user feedback on ${file}. This stays silent until the user sends feedback or ends the session - leave it running. ` +
+    `[george-showroom] Long-polling for user feedback on ${file}. This stays silent until the user sends feedback or ends the session - leave it running. ` +
     `Detected layout issues do NOT return this poll: they wait in the user's Layout issues inbox until the user queues them as ordinary feedback. ` +
-    `If it gets killed or times out, re-run \`lavish-axi poll ${file}\` - queued feedback is never lost.`
+    `If it gets killed or times out, re-run \`george-showroom poll ${file}\` - queued feedback is never lost.`
   );
 }
 
 export function pollWaitTickText(elapsedMs) {
   const minutes = Math.round(elapsedMs / 60_000);
-  return `[lavish-axi] Still waiting for user feedback (${minutes}m). Leave this running until the user sends feedback or ends the session.`;
+  return `[george-showroom] Still waiting for user feedback (${minutes}m). Leave this running until the user sends feedback or ends the session.`;
 }
 
 export function pollInterruptedText(file) {
   return (
-    `[lavish-axi] Poll interrupted before user feedback arrived. The user may still be reviewing - ` +
-    `re-run \`lavish-axi poll ${file}\` to keep waiting; queued feedback is never lost.`
+    `[george-showroom] Poll interrupted before user feedback arrived. The user may still be reviewing - ` +
+    `re-run \`george-showroom poll ${file}\` to keep waiting; queued feedback is never lost.`
   );
 }
 
@@ -371,8 +373,8 @@ export function startPollWaitReporter({
  */
 export function createPollOutput({ file, response, agent = "generic" }) {
   if (response.status === "missing") {
-    throw new AxiError("No active Lavish Editor session for this file", "NOT_FOUND", [
-      `Run \`lavish-axi ${file}\` first`,
+    throw new AxiError("No active George Showroom session for this file", "NOT_FOUND", [
+      `Run \`george-showroom ${file}\` first`,
     ]);
   }
   if (response.status === "feedback") {
@@ -399,37 +401,37 @@ export function createPollOutput({ file, response, agent = "generic" }) {
   }
   return {
     session: { file, status: response.status || "waiting" },
-    next_step: `No user feedback arrived before the optional timeout. Run \`lavish-axi poll ${file}\` without --timeout-ms to wait indefinitely - queued feedback is never lost, so re-running the poll is always safe.`,
+    next_step: `No user feedback arrived before the optional timeout. Run \`george-showroom poll ${file}\` without --timeout-ms to wait indefinitely - queued feedback is never lost, so re-running the poll is always safe.`,
   };
 }
 
 function createFeedbackNextStep(file, artifactFailures, sessionEnded, endedBy, prompts = [], agent = "generic") {
   const count = artifactFailures.length;
   const whiteboardNote = prompts.some((prompt) => prompt && prompt.tag === "whiteboard")
-    ? `This feedback includes whiteboard edits (tag "whiteboard"): read the edit summary in the prompt text first, and only when it is not enough, open the target's scenePath (.excalidraw scene JSON) or previewPath (PNG) local files for detail. The artifact's Mermaid source stays authoritative - apply the edits by updating the Mermaid text in ${file} (Lavish live-reloads it); never try to write the .excalidraw scene back. `
+    ? `This feedback includes whiteboard edits (tag "whiteboard"): read the edit summary in the prompt text first, and only when it is not enough, open the target's scenePath (.excalidraw scene JSON) or previewPath (PNG) local files for detail. The artifact's Mermaid source stays authoritative - apply the edits by updating the Mermaid text in ${file} (George Showroom live-reloads it); never try to write the .excalidraw scene back. `
     : "";
   const layoutNote = prompts.some((prompt) => prompt && prompt.tag === "layout-warnings")
-    ? `This feedback includes layout issues the user selected from the Lavish Layout issues inbox (tag "layout-warnings"): the target lists the exact warning ids and targets. Apply every listed fix in one pass before saving so the user's review refreshes once. Queueing is a repair request, not a resolution - Lavish only marks a warning resolved after a newer artifact load and a complete check at the same viewport no longer detects it. `
+    ? `This feedback includes layout issues the user selected from the George Showroom Layout issues inbox (tag "layout-warnings"): the target lists the exact warning ids and targets. Apply every listed fix in one pass before saving so the user's review refreshes once. Queueing is a repair request, not a resolution - George Showroom only marks a warning resolved after a newer artifact load and a complete check at the same viewport no longer detects it. `
     : "";
   if (sessionEnded) {
     const failureNote =
       count > 0
         ? endedBy === "user"
-          ? `${count} fatal artifact failure${count === 1 ? "" : "s"} arrived alongside this final feedback - the review surface itself could not be used. Repair ${file}, then open it directly and confirm it renders without reopening this ended Lavish session. `
-          : `${count} fatal artifact failure${count === 1 ? "" : "s"} arrived alongside this final feedback - the review surface itself could not be used. Repair ${file}, then run \`lavish-axi ${file}\` to open a fresh session. `
+          ? `${count} fatal artifact failure${count === 1 ? "" : "s"} arrived alongside this final feedback - the review surface itself could not be used. Repair ${file}, then open it directly and confirm it renders without reopening this ended George Showroom session. `
+          : `${count} fatal artifact failure${count === 1 ? "" : "s"} arrived alongside this final feedback - the review surface itself could not be used. Repair ${file}, then run \`george-showroom ${file}\` to open a fresh session. `
         : "";
     if (endedBy === "user") {
       const reopenNote =
         count > 0
           ? ""
-          : ` Only run \`lavish-axi ${file} --reopen\` if the user explicitly asks for further review or something genuinely important needs their visual attention.`;
+          : ` Only run \`george-showroom ${file} --reopen\` if the user explicitly asks for further review or something genuinely important needs their visual attention.`;
       return `${failureNote}${layoutNote}${whiteboardNote}This was the last feedback before the user ended the session. Stop polling ${file} and do not reopen it - deliver any remaining updates directly in this conversation instead.${reopenNote}`;
     }
-    return `${failureNote}${layoutNote}${whiteboardNote}This was the last feedback before the Lavish Editor session ended. Stop polling ${file}. Deliver any remaining updates directly in this conversation, or run \`lavish-axi ${file}\` to open a fresh session if the user needs further visual review.`;
+    return `${failureNote}${layoutNote}${whiteboardNote}This was the last feedback before the George Showroom session ended. Stop polling ${file}. Deliver any remaining updates directly in this conversation, or run \`george-showroom ${file}\` to open a fresh session if the user needs further visual review.`;
   }
   const prefix =
     count > 0 ? artifactFailuresPrefix(file, artifactFailures) : `Apply the requested changes to ${file}. `;
-  return `${prefix}${layoutNote}${whiteboardNote}Do not respond to the user just yet. Now you must run \`lavish-axi poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms unless the user ended the session. The poll waits silently until the user sends more feedback or ends the session - never kill it. ${pollExecutionGuidance({ agent })}`;
+  return `${prefix}${layoutNote}${whiteboardNote}Do not respond to the user just yet. Now you must run \`george-showroom poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms unless the user ended the session. The poll waits silently until the user sends more feedback or ends the session - never kill it. ${pollExecutionGuidance({ agent })}`;
 }
 
 // The narrow fatal path. Ordinary layout findings never reach the poll: they wait in the user's
@@ -442,20 +444,20 @@ function artifactFailuresPrefix(file, artifactFailures) {
     .map((failure) => `${failure.kind}: ${failure.detail}`)
     .slice(0, 5)
     .join("; ");
-  return `${count} fatal artifact failure${plural} detected - the review surface could not be used (${details}). Repair ${file} so it renders with all of its local assets, then re-check in the browser. Lavish live-reloads the artifact automatically after you save, so you do not need to re-run \`lavish-axi ${file}\` for this. `;
+  return `${count} fatal artifact failure${plural} detected - the review surface could not be used (${details}). Repair ${file} so it renders with all of its local assets, then re-check in the browser. George Showroom live-reloads the artifact automatically after you save, so you do not need to re-run \`george-showroom ${file}\` for this. `;
 }
 
 function createEndedNextStep(file, endedBy) {
   if (endedBy === "user") {
-    return `The user ended this Lavish Editor session. Stop polling ${file} - do not run \`lavish-axi ${file}\` to reopen it. Deliver any remaining updates directly in this conversation instead. Only reopen with \`lavish-axi ${file} --reopen\` if the user explicitly asks for further review or something genuinely important needs their visual attention.`;
+    return `The user ended this George Showroom session. Stop polling ${file} - do not run \`george-showroom ${file}\` to reopen it. Deliver any remaining updates directly in this conversation instead. Only reopen with \`george-showroom ${file} --reopen\` if the user explicitly asks for further review or something genuinely important needs their visual attention.`;
   }
-  return `This Lavish Editor session for ${file} has ended. Stop polling. Deliver any remaining updates directly in this conversation, or run \`lavish-axi ${file}\` to open a fresh session if the user needs further visual review.`;
+  return `This George Showroom session for ${file} has ended. Stop polling. Deliver any remaining updates directly in this conversation, or run \`george-showroom ${file}\` to open a fresh session if the user needs further visual review.`;
 }
 
 async function endCommand(args) {
   const file = firstPositionalArg(args);
   if (!file) {
-    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi end <html-file>`"]);
+    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `george-showroom end <html-file>`"]);
   }
   const absolute = await canonicalFile(file);
   const baseUrl = await ensureServer();
@@ -465,12 +467,12 @@ async function endCommand(args) {
 
 // Produce a portable copy of an artifact: one HTML file with its LOCAL assets (relative-path
 // stylesheets, scripts, images, fonts) inlined as data URIs. Remote CDN/font references are left
-// as-is for the browser to load, so the export needs network to render those. Lavish makes no
+// as-is for the browser to load, so the export needs network to render those. George Showroom makes no
 // outbound requests - export is a pure local file transform, server-independent.
 async function exportCommand(args) {
   const file = firstPositionalArg(args, ["--out"]);
   if (!file) {
-    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi export <html-file>`"]);
+    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `george-showroom export <html-file>`"]);
   }
   await assertHtmlFile(file);
   const absolute = await canonicalFile(file);
@@ -505,9 +507,9 @@ export function createExportOutput({ source, output, html, warnings }) {
     result.next_step =
       "Some LOCAL assets could not be inlined and were left as references (see unresolved_local_assets); they will break once the file is moved. Remote CDN/font references are intentionally left as links and render where there is network access.";
   } else if (notices.length) {
-    result.next_step = `Wrote ${output} with export notices (see notices). Open it directly or host it anywhere - it needs no Lavish server. Local assets are inlined; remote CDN/font references are left as links, so it needs network to render those.`;
+    result.next_step = `Wrote ${output} with export notices (see notices). Open it directly or host it anywhere - it needs no George Showroom server. Local assets are inlined; remote CDN/font references are left as links, so it needs network to render those.`;
   } else {
-    result.next_step = `Wrote ${output}. Open it directly or host it anywhere - it needs no Lavish server. Local assets are inlined; remote CDN/font references are left as links, so it needs network to render those.`;
+    result.next_step = `Wrote ${output}. Open it directly or host it anywhere - it needs no George Showroom server. Local assets are inlined; remote CDN/font references are left as links, so it needs network to render those.`;
   }
   return result;
 }
@@ -518,13 +520,13 @@ function assetWarningSummaries(warnings) {
 
 // Publish the artifact as a visitable page on third-party ht-ml.app. Builds the same local-inlined
 // HTML as `export` (remote refs left as links), then POSTs it to ht-ml.app's `/v1/sites` API,
-// sending the artifact to ht-ml.app's servers. The service is not part of Lavish, needs no
+// sending the artifact to ht-ml.app's servers. The service is not part of George Showroom, needs no
 // account or API key, and returns the share URL plus the secret update_key for
 // managing the page later. Server-independent.
 async function shareCommand(args) {
   const file = firstPositionalArg(args, ["--password", "--token"]);
   if (!file) {
-    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi share <html-file>`"]);
+    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `george-showroom share <html-file>`"]);
   }
   await assertHtmlFile(file);
   const absolute = await canonicalFile(file);
@@ -565,7 +567,7 @@ export function createShareOutput({ source, site, warnings, passwordProtected = 
   if (notices.length) result.notices = assetWarningSummaries(notices);
   const noticeNote = notices.length ? " Export notices are available in notices." : "";
   const hostNote =
-    "ht-ml.app (https://ht-ml.app), a third-party host not part of Lavish, hosts the page, so it needs no Lavish server.";
+    "ht-ml.app (https://ht-ml.app), a third-party host not part of George Showroom, hosts the page, so it needs no George Showroom server.";
   if (unresolved.length) {
     result.next_step =
       `Published ${isPasswordProtected ? "a PASSWORD-PROTECTED page at " : ""}${site.url}, but some LOCAL assets could not be inlined and were left as references (see unresolved_local_assets); inspect the hosted page and fix missing local assets before sharing it.${passwordNote}${noticeNote} ` +
@@ -588,7 +590,7 @@ export function createShareOutput({ source, site, warnings, passwordProtected = 
   return result;
 }
 
-// Explicitly shut down the running Lavish Editor server. Unlike `end` (which closes a single
+// Explicitly shut down the running George Showroom server. Unlike `end` (which closes a single
 // session), this stops the background process so it stops dangling between sessions.
 export async function stopCommand(args) {
   const port = Number(flagValue(args, "--port") || defaultPort());
@@ -635,18 +637,24 @@ async function designCommand() {
 async function setupCommand(args) {
   if (args.length !== 1 || (args[0] !== "hooks" && args[0] !== "plugin")) {
     throw new AxiError("Unknown setup action", "VALIDATION_ERROR", [
-      "Run `lavish-axi setup hooks`",
-      "Run `lavish-axi setup plugin`",
+      "Run `george-showroom setup hooks`",
+      "Run `george-showroom setup plugin`",
     ]);
   }
 
   if (args[0] === "plugin") return setupPluginCommand();
 
   const errors = [];
+  cleanupLegacyAgentHooks(resolveHookHomeDir(), (message) => errors.push(message));
   installSessionStartHooks({
-    marker: "lavish-axi",
-    binaryNames: ["lavish-axi"],
-    distEntrypoints: ["dist/cli.mjs", "bin/lavish-axi.js"],
+    execPath: resolvePrimaryHookEntrypoint(process.argv[1]),
+    marker: "george-showroom",
+    binaryNames: ["george-showroom", "lavish-axi"],
+    distEntrypoints: ["dist/cli.mjs", "bin/george-showroom.js", "bin/lavish-axi.js"],
+    // This is already behind an explicit `setup hooks` action in our packaged CLI.
+    // The SDK's default path-marker gate rejects the temporary `lavish-axi` alias
+    // before it considers binaryNames, so use the explicit-action boundary here.
+    shouldInstall: () => true,
     homeDir: resolveHookHomeDir(),
     onError: (message) => errors.push(message),
   });
@@ -656,16 +664,23 @@ async function setupCommand(args) {
   });
 
   if (errors.length > 0) {
-    throw new AxiError("Failed to install lavish-axi agent hooks", "SERVER_ERROR", errors);
+    throw new AxiError("Failed to install george-showroom agent hooks", "SERVER_ERROR", errors);
   }
 
   return {
     hooks: { status: "installed", integrations: "Claude Code, Codex, OpenCode, GitHub Copilot CLI" },
     help: [
-      "Restart your agent session to receive lavish-axi ambient context",
-      "Run `lavish-axi setup plugin` to also register the Agent Plugin in VS Code, Cursor, and GitHub Copilot CLI",
+      "Restart your agent session to receive george-showroom ambient context",
+      "Run `george-showroom setup plugin` to also register the Agent Plugin in VS Code, Cursor, and GitHub Copilot CLI",
     ],
   };
+}
+
+function resolvePrimaryHookEntrypoint(executablePath) {
+  if (!executablePath) return executablePath;
+  if (path.basename(executablePath) !== "lavish-axi.js") return executablePath;
+  const primary = path.join(path.dirname(executablePath), "george-showroom.js");
+  return existsSync(primary) ? primary : executablePath;
 }
 
 /**
@@ -681,9 +696,9 @@ async function setupPluginCommand() {
   const pluginRoot = resolvePluginRoot();
   const manifest = readPluginManifest(pluginRoot);
   if (!manifest) {
-    throw new AxiError("No plugin.json found in the lavish-axi package", "SERVER_ERROR", [
+    throw new AxiError("No plugin.json found in the george-showroom package", "SERVER_ERROR", [
       `Expected a manifest at ${path.join(pluginRoot, "plugin.json")}`,
-      "Reinstall lavish-axi, or run `npm run build:plugin` when working from a source checkout",
+      "Reinstall george-showroom, or run `npm run build:plugin` when working from a source checkout",
     ]);
   }
 
@@ -695,7 +710,7 @@ async function setupPluginCommand() {
 
   const help = ["Restart or reload each client so it discovers the plugin"];
   if (clients.some((client) => client.status === "absent")) {
-    help.push("Absent clients are skipped; re-run `lavish-axi setup plugin` after installing one");
+    help.push("Absent clients are skipped; re-run `george-showroom setup plugin` after installing one");
   }
   if (clients.some((client) => client.status === "manual")) {
     help.push(`Register the plugin root manually where noted: ${pluginRoot}`);
@@ -780,6 +795,7 @@ function registerCursorPlugin(pluginRoot, pluginName) {
         detail: `cannot link ${collapseHome(target)} (${reason}); link it to ${pluginRoot} manually, or enable Developer Mode on Windows`,
       };
     }
+    removeLegacyCursorPluginLinks(resolveCursorLocalPluginsDir(resolveHookHomeDir()), pluginName);
     return {
       client: "cursor",
       status: status === "current" ? "current" : "registered",
@@ -815,13 +831,21 @@ function registerCopilotPlugin(pluginRoot, pluginName) {
   }
 
   const existing = records.find((record) => record.name === pluginName && (!record.kind || record.kind === "plugin"));
+  const legacy =
+    pluginName === "george-showroom"
+      ? records.find((record) => record.name === "lavish-axi" && (!record.kind || record.kind === "plugin"))
+      : null;
   if (existing) {
     const source = copilotPluginSourcePath(existing) || installedCopilotPluginSourcePath(pluginName);
     if (!source) {
       return { client: "copilot", status: "manual", detail: "could not verify the installed plugin source" };
     }
     if (sameResolvedPath(source, pluginRoot)) {
-      return { client: "copilot", status: "current", detail: collapseHome(pluginRoot) };
+      return finishCopilotPluginRegistration({
+        legacy,
+        status: "current",
+        detail: collapseHome(pluginRoot),
+      });
     }
   }
 
@@ -830,7 +854,23 @@ function registerCopilotPlugin(pluginRoot, pluginName) {
     const detail = String(installed.stderr || installed.stdout || `exit ${installed.status}`).trim();
     return { client: "copilot", status: "failed", detail: detail.split("\n")[0] };
   }
-  return { client: "copilot", status: "registered", detail: "copilot plugin install" };
+  return finishCopilotPluginRegistration({ legacy, status: "registered", detail: "copilot plugin install" });
+}
+
+function finishCopilotPluginRegistration({ legacy, status, detail }) {
+  if (!legacy) return { client: "copilot", status, detail };
+  const removed = spawnPluginClientSync("copilot", ["plugin", "uninstall", "lavish-axi"]);
+  if (removed.status !== 0) {
+    const reason = String(removed.stderr || removed.stdout || `exit ${removed.status}`)
+      .trim()
+      .split("\n")[0];
+    return {
+      client: "copilot",
+      status: "manual",
+      detail: `${detail}; remove the legacy lavish-axi plugin manually (${reason})`,
+    };
+  }
+  return { client: "copilot", status, detail: `${detail}; migrated lavish-axi registration` };
 }
 
 /** @param {unknown} output @returns {Record<string, any>[] | null} */
@@ -899,7 +939,77 @@ export function resolveCopilotHookDir(env = process.env, homeDir = resolveHookHo
   return path.join(env.COPILOT_HOME || path.join(homeDir, ".copilot"), "hooks");
 }
 
-export function createCopilotCliAmbientContextScript(command = "lavish-axi") {
+function isLegacyLavishExecutable(command) {
+  if (typeof command !== "string") return false;
+  const trimmed = command.trim();
+  const normalized = trimmed.replaceAll("\\", "/");
+  if (normalized === "lavish-axi") return true;
+  const isAbsolute = path.isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed);
+  if (!isAbsolute) return false;
+  // A hook command may be either an executable path or an entire shell command.
+  // Whitespace-bearing values are only safe to treat as paths when the whole
+  // value resolves to a filesystem entry; otherwise preserve the user's hook.
+  if (/\s/.test(trimmed) && !existsSync(trimmed)) return false;
+  if (normalized.endsWith("/lavish-axi") || normalized.endsWith("/bin/lavish-axi.js")) return true;
+  return normalized.includes("/lavish-axi/") && normalized.endsWith("/dist/cli.mjs");
+}
+
+function isLegacySessionStartHook(entry) {
+  return entry && typeof entry === "object" && isLegacyLavishExecutable(entry.command);
+}
+
+export function computeLegacySessionHookCleanup(settings) {
+  const updated = structuredClone(settings && typeof settings === "object" ? settings : {});
+  const hooks = updated.hooks;
+  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) return [settings, false];
+  let changed = false;
+
+  if (Array.isArray(hooks.session_start)) {
+    const next = hooks.session_start.filter((entry) => !isLegacySessionStartHook(entry));
+    if (next.length !== hooks.session_start.length) {
+      if (next.length === 0) delete hooks.session_start;
+      else hooks.session_start = next;
+      changed = true;
+    }
+  }
+  if (Array.isArray(hooks.SessionStart)) {
+    const groups = hooks.SessionStart.map((group) => {
+      if (!group || !Array.isArray(group.hooks)) return group;
+      const next = group.hooks.filter((entry) => !isLegacySessionStartHook(entry));
+      if (next.length !== group.hooks.length) changed = true;
+      return next.length === 0 ? null : { ...group, hooks: next };
+    }).filter(Boolean);
+    if (groups.length !== hooks.SessionStart.length) changed = true;
+    if (groups.length === 0) delete hooks.SessionStart;
+    else hooks.SessionStart = groups;
+  }
+
+  return [changed ? updated : settings, changed];
+}
+
+function cleanupLegacyAgentHooks(homeDir, onError) {
+  for (const target of [path.join(homeDir, ".claude", "settings.json"), path.join(homeDir, ".codex", "hooks.json")]) {
+    if (!existsSync(target)) continue;
+    try {
+      const current = JSON.parse(readFileSync(target, "utf8"));
+      const [updated, changed] = computeLegacySessionHookCleanup(current);
+      if (changed) writeTextFileAtomically(target, `${JSON.stringify(updated, null, 2)}\n`);
+    } catch (error) {
+      onError?.(`${target}: ${String(error instanceof Error ? error.message : error)}`);
+    }
+  }
+
+  const legacyOpenCode = path.join(homeDir, ".config", "opencode", "plugins", "axi-lavish-axi.js");
+  if (!existsSync(legacyOpenCode)) return;
+  try {
+    const source = readFileSync(legacyOpenCode, "utf8");
+    if (source.includes("axi-sdk-js managed opencode plugin: lavish-axi")) rmSync(legacyOpenCode);
+  } catch (error) {
+    onError?.(`${legacyOpenCode}: ${String(error instanceof Error ? error.message : error)}`);
+  }
+}
+
+export function createCopilotCliAmbientContextScript(command = "george-showroom") {
   return [
     'const { spawnSync } = require("node:child_process");',
     `const command = ${JSON.stringify(command)};`,
@@ -907,13 +1017,32 @@ export function createCopilotCliAmbientContextScript(command = "lavish-axi") {
     'const detail = result.error ? result.error.message : (result.stderr || result.stdout || "exit " + (result.status ?? "unknown"));',
     "const text = String(result.status === 0 ? result.stdout : detail).trim();",
     'if (!text) { console.log("{}"); process.exit(0); }',
-    'const prefix = result.status === 0 ? "## AXI ambient context: lavish-axi\\n" : "## AXI ambient context: lavish-axi\\nerror: lavish-axi ambient context failed: ";',
+    'const prefix = result.status === 0 ? "## AXI ambient context: george-showroom\\n" : "## AXI ambient context: george-showroom\\nerror: george-showroom ambient context failed: ";',
     "console.log(JSON.stringify({ additionalContext: prefix + text }));",
   ].join(" ");
 }
 
-export function createCopilotCliSessionStartHook(command = "lavish-axi", timeoutSec = 10) {
+export function createCopilotCliSessionStartHook(command = "george-showroom", timeoutSec = 10) {
   const script = createCopilotCliAmbientContextScript(command);
+  return {
+    type: "command",
+    bash: `node -e ${quoteForPosixShell(script)}`,
+    powershell: `node -e ${quoteForPowerShell(script)}`,
+    timeoutSec,
+  };
+}
+
+export function createLegacyCopilotCliSessionStartHook(timeoutSec = 10) {
+  const script = [
+    'const { spawnSync } = require("node:child_process");',
+    'const command = "lavish-axi";',
+    'const result = spawnSync(command, [], { encoding: "utf8", shell: true });',
+    'const detail = result.error ? result.error.message : (result.stderr || result.stdout || "exit " + (result.status ?? "unknown"));',
+    "const text = String(result.status === 0 ? result.stdout : detail).trim();",
+    'if (!text) { console.log("{}"); process.exit(0); }',
+    'const prefix = result.status === 0 ? "## AXI ambient context: lavish-axi\\n" : "## AXI ambient context: lavish-axi\\nerror: lavish-axi ambient context failed: ";',
+    "console.log(JSON.stringify({ additionalContext: prefix + text }));",
+  ].join(" ");
   return {
     type: "command",
     bash: `node -e ${quoteForPosixShell(script)}`,
@@ -936,7 +1065,7 @@ export function computeCopilotCliHookUpdate(settings, hook = createCopilotCliSes
   }
 
   const current = Array.isArray(updated.hooks.sessionStart) ? updated.hooks.sessionStart : [];
-  const unmanaged = current.filter((entry) => !isManagedCopilotCliHook(entry));
+  const unmanaged = current.filter((entry) => !sameFlatObject(entry, hook) && !isManagedCopilotCliHook(entry));
   const next = [...unmanaged, hook];
 
   if (!deepEqual(current, next)) {
@@ -949,36 +1078,69 @@ export function computeCopilotCliHookUpdate(settings, hook = createCopilotCliSes
 
 export function installCopilotCliSessionStartHook({
   hookDir = resolveCopilotHookDir(),
-  command = "lavish-axi",
+  command = "george-showroom",
   timeoutSec = 10,
   onError = undefined,
 } = {}) {
-  const target = path.join(hookDir, "lavish-axi.json");
+  const target = path.join(hookDir, "george-showroom.json");
+  const legacyTarget = path.join(hookDir, "lavish-axi.json");
   try {
     mkdirSync(path.dirname(target), { recursive: true });
     const current = existsSync(target) ? JSON.parse(readFileSync(target, "utf8")) : {};
+    let combined = current;
+    let removeLegacy = false;
+    if (existsSync(legacyTarget)) {
+      const legacy = JSON.parse(readFileSync(legacyTarget, "utf8"));
+      const legacyHooks = Array.isArray(legacy?.hooks?.sessionStart) ? legacy.hooks.sessionStart : [];
+      removeLegacy = legacyHooks.some((entry) => isManagedCopilotCliHook(entry, ["lavish-axi"]));
+      if (removeLegacy) {
+        const legacyObject = legacy && typeof legacy === "object" ? legacy : {};
+        const currentObject = current && typeof current === "object" ? current : {};
+        const legacyHookObject =
+          legacyObject.hooks && typeof legacyObject.hooks === "object" && !Array.isArray(legacyObject.hooks)
+            ? legacyObject.hooks
+            : {};
+        const currentHookObject =
+          currentObject.hooks && typeof currentObject.hooks === "object" && !Array.isArray(currentObject.hooks)
+            ? currentObject.hooks
+            : {};
+        combined = {
+          ...structuredClone(legacyObject),
+          ...structuredClone(currentObject),
+          hooks: { ...structuredClone(legacyHookObject), ...structuredClone(currentHookObject) },
+        };
+        for (const key of new Set([...Object.keys(legacyHookObject), ...Object.keys(currentHookObject)])) {
+          const legacyEntries = Array.isArray(legacyHookObject[key]) ? legacyHookObject[key] : [];
+          const currentEntries = Array.isArray(currentHookObject[key]) ? currentHookObject[key] : [];
+          if (legacyEntries.length > 0 || currentEntries.length > 0) {
+            combined.hooks[key] = [...currentEntries, ...legacyEntries];
+          }
+        }
+      }
+    }
     const [updated, changed] = computeCopilotCliHookUpdate(
-      current,
+      combined,
       createCopilotCliSessionStartHook(command, timeoutSec),
     );
     if (changed) {
       writeFileSync(target, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
     }
+    if (removeLegacy) rmSync(legacyTarget);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     onError?.(`${target}: ${message}`);
   }
 }
 
-function isManagedCopilotCliHook(entry) {
-  return (
-    entry &&
-    typeof entry === "object" &&
-    (typeof entry.bash === "string" || typeof entry.powershell === "string" || typeof entry.command === "string") &&
-    [entry.bash, entry.powershell, entry.command].some(
-      (value) => typeof value === "string" && value.includes("lavish-axi"),
-    )
-  );
+function isManagedCopilotCliHook(entry, markers = ["george-showroom", "lavish-axi"]) {
+  if (!entry || typeof entry !== "object") return false;
+  if (markers.includes("lavish-axi")) {
+    const exactExecutable = [entry.bash, entry.powershell, entry.command].some(isLegacyLavishExecutable);
+    if (exactExecutable) return true;
+    const timeoutSec = Number.isFinite(entry.timeoutSec) ? entry.timeoutSec : 10;
+    if (sameFlatObject(entry, createLegacyCopilotCliSessionStartHook(timeoutSec))) return true;
+  }
+  return false;
 }
 
 function quoteForPosixShell(value) {
@@ -991,6 +1153,17 @@ function quoteForPowerShell(value) {
 
 function deepEqual(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function sameFlatObject(left, right) {
+  if (!left || typeof left !== "object" || Array.isArray(left)) return false;
+  if (!right || typeof right !== "object" || Array.isArray(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key])
+  );
 }
 
 async function serverCommand(args) {
@@ -1008,13 +1181,15 @@ async function visibleSessions() {
 
 async function assertHtmlFile(file) {
   if (!isHtmlPath(file)) {
-    throw new AxiError("Lavish Editor expects an HTML file", "VALIDATION_ERROR", ["Run `lavish-axi <html-file>`"]);
+    throw new AxiError("George Showroom expects an HTML file", "VALIDATION_ERROR", [
+      "Run `george-showroom <html-file>`",
+    ]);
   }
   try {
     await access(file);
   } catch {
     throw new AxiError(`File not found: ${file}`, "NOT_FOUND", [
-      "Create the HTML artifact first, then run `lavish-axi <html-file>`",
+      "Create the HTML artifact first, then run `george-showroom <html-file>`",
     ]);
   }
 }
@@ -1032,7 +1207,7 @@ async function ensureServer({ forceRestart = false } = {}) {
   }
   if (existing) {
     if (!(await canControlServerOnPort(port, existing, processOnPortMatchesLavish))) {
-      throw new AxiError(`Port ${port} is occupied by a non-Lavish server`, "SERVER_ERROR", [
+      throw new AxiError(`Port ${port} is occupied by a non-George Showroom server`, "SERVER_ERROR", [
         `Stop the process using port ${port}, or set LAVISH_AXI_PORT to another port`,
       ]);
     }
@@ -1059,8 +1234,8 @@ async function ensureServer({ forceRestart = false } = {}) {
     }
     await delay(100);
   }
-  throw new AxiError("Lavish Editor server did not start", "SERVER_ERROR", [
-    `Run \`lavish-axi server --port ${port}\` to inspect server startup`,
+  throw new AxiError("George Showroom server did not start", "SERVER_ERROR", [
+    `Run \`george-showroom server --port ${port}\` to inspect server startup`,
   ]);
 }
 
@@ -1070,7 +1245,10 @@ async function ensureServer({ forceRestart = false } = {}) {
 // to step aside.
 export function shouldRestartServer(currentVersion, healthBody, forceRestart = false) {
   if (!healthBody || typeof healthBody !== "object") return false;
-  if (forceRestart && healthBody.app === "lavish-axi") return true;
+  if (forceRestart && SERVER_APP_IDS.has(healthBody.app)) return true;
+  // A same-version upstream Lavish process still serves the upstream product chrome.
+  // Replace it once so the primary George Showroom invocation is visibly ours.
+  if (healthBody.app === "lavish-axi") return true;
   if (typeof healthBody.version !== "string" || healthBody.version === "") return true;
   return healthBody.version !== currentVersion;
 }
@@ -1087,13 +1265,14 @@ function localSourceServerExists() {
 export function shouldKillProcessOnPort(currentVersion, healthBody) {
   if (!healthBody || typeof healthBody !== "object") return false;
   if (typeof healthBody.version !== "string" || healthBody.version === "") return true;
-  if (healthBody.app !== "lavish-axi") return false;
+  if (!SERVER_APP_IDS.has(healthBody.app)) return false;
+  if (healthBody.app === "lavish-axi") return true;
   return healthBody.version !== currentVersion;
 }
 
 async function canControlServerOnPort(port, healthBody, processMatchesLavish) {
   if (!healthBody || typeof healthBody !== "object") return false;
-  if (healthBody.app === "lavish-axi") return true;
+  if (SERVER_APP_IDS.has(healthBody.app)) return true;
   if (typeof healthBody.version === "string" && healthBody.version !== "") return false;
   return processMatchesLavish(port);
 }
@@ -1127,7 +1306,7 @@ async function waitForPortFree(baseUrl, timeoutMs) {
 
 // Last-resort fallback for the bootstrap upgrade case: a pre-handshake server is squatting
 // on the port and doesn't expose /shutdown, so we resolve its PID via lsof and SIGTERM it.
-// macOS/Linux only - Windows users would need to kill manually, but lavish-axi isn't
+// macOS/Linux only - Windows users would need to kill manually, but george-showroom isn't
 // shipped for Windows today.
 function killProcessOnPort(port) {
   try {
@@ -1156,7 +1335,7 @@ function processOnPortMatchesLavish(port) {
       const pid = Number(line.trim());
       if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
       const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-      if (command.status === 0 && /lavish-axi/.test(command.stdout)) {
+      if (command.status === 0 && /(george-showroom|lavish-axi)/.test(command.stdout)) {
         return true;
       }
     }
@@ -1184,11 +1363,11 @@ async function startServer(port) {
 }
 
 // The detached server child must point at a node-executable entry that actually invokes
-// run(). In source layout that's `../bin/lavish-axi.js` (which calls run on import). In the
+// run(). In source layout that's `../bin/george-showroom.js` (which calls run on import). In the
 // published bundle, only `dist/cli.mjs` ships and it self-invokes via the bundled bin
 // wrapper. Pick whichever exists.
 export function resolveServerEntry() {
-  const binEntry = fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url));
+  const binEntry = fileURLToPath(new URL("../bin/george-showroom.js", import.meta.url));
   if (existsSync(binEntry)) return binEntry;
   return fileURLToPath(import.meta.url);
 }
@@ -1223,7 +1402,7 @@ export async function fetchJson(url, { retries = 0, retryDelayMs = 250 } = {}) {
 
   if (!response) throw serverConnectionError();
   if (!response.ok) {
-    throw new AxiError(`Lavish Editor request failed: ${response.status}`, "SERVER_ERROR");
+    throw new AxiError(`George Showroom request failed: ${response.status}`, "SERVER_ERROR");
   }
   try {
     return await response.json();
@@ -1244,22 +1423,22 @@ async function postJson(url, body) {
     throw serverConnectionError();
   }
   if (!response.ok) {
-    throw new AxiError(`Lavish Editor request failed: ${response.status}`, "SERVER_ERROR");
+    throw new AxiError(`George Showroom request failed: ${response.status}`, "SERVER_ERROR");
   }
   return response.json();
 }
 
 function serverConnectionError() {
-  return new AxiError("Lavish Editor server connection failed", "SERVER_ERROR", [
-    "Run `lavish-axi server --verbose` or inspect `~/.lavish-axi/server.log` (`LAVISH_AXI_STATE_DIR/server.log` when set) for server startup or crash diagnostics",
-    "Re-run the last `lavish-axi poll <html-file>` command after the server is healthy",
+  return new AxiError("George Showroom server connection failed", "SERVER_ERROR", [
+    "Run `george-showroom server --verbose` or inspect `~/.lavish-axi/server.log` (`LAVISH_AXI_STATE_DIR/server.log` when set) for server startup or crash diagnostics",
+    "Re-run the last `george-showroom poll <html-file>` command after the server is healthy",
   ]);
 }
 
 function pollResponseInterruptedError() {
-  return new AxiError("Lavish Editor poll response was interrupted", "SERVER_ERROR", [
-    "Run `lavish-axi server --verbose` or inspect `~/.lavish-axi/server.log` (`LAVISH_AXI_STATE_DIR/server.log` when set) for server startup or crash diagnostics",
-    "Re-run the last `lavish-axi poll <html-file>` command after the server is healthy",
+  return new AxiError("George Showroom poll response was interrupted", "SERVER_ERROR", [
+    "Run `george-showroom server --verbose` or inspect `~/.lavish-axi/server.log` (`LAVISH_AXI_STATE_DIR/server.log` when set) for server startup or crash diagnostics",
+    "Re-run the last `george-showroom poll <html-file>` command after the server is healthy",
   ]);
 }
 
@@ -1315,21 +1494,21 @@ export function getCommandHelp(command, { agent = "generic" } = {}) {
 }
 
 function createTopLevelHelp({ agent = "generic" } = {}) {
-  return `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n  lavish-axi poll <html-file> [--agent-reply "..."]\n  lavish-axi end <html-file>\n  lavish-axi export <html-file> [--out <path>]\n  lavish-axi share <html-file> [--password <pw>] [--token <t>]\n  lavish-axi stop\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi setup hooks\n  lavish-axi setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls indefinitely by default until the user sends feedback or ends the session, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the Lavish top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
+  return `george-showroom - George Showroom AXI\n\nUsage:\n  george-showroom\n  george-showroom <html-file> [--no-open] [--no-gate] [--reopen]\n  george-showroom poll <html-file> [--agent-reply "..."]\n  george-showroom end <html-file>\n  george-showroom export <html-file> [--out <path>]\n  george-showroom share <html-file> [--password <pw>] [--token <t>]\n  george-showroom stop\n  george-showroom playbook [playbook_id]\n  george-showroom design\n  george-showroom setup hooks\n  george-showroom setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls indefinitely by default until the user sends feedback or ends the session, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the George Showroom top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
 }
 
 function createCommandHelp({ agent = "generic" } = {}) {
   return {
-    open: `Usage: lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n\nOpen or resume a Lavish Editor review session for an HTML artifact. Use --no-open when you need to ensure the server/session exists without opening another browser window. Use --no-gate to skip the open-time layout curtain for this browser open. If the user explicitly ended the session from the browser, this refuses to reopen it and returns guidance instead - pass --reopen to force it open when the user asks for further review or something important needs their visual attention. Sessions ended by the agent (\`lavish-axi end\`) reopen normally without the flag.\n`,
-    poll: `Usage: lavish-axi poll <html-file> [--agent-reply "..."]\n\nThis command long-polls indefinitely for queued user prompts. It stays silent while it waits - that is normal, never kill it. Browser-detected layout issues do NOT return this poll: they are filed passively in the user's Layout issues inbox and arrive as an ordinary tag "layout-warnings" prompt only after the user selects them and queues the fixes. Warning lifecycle: an issue stays unresolved and counted while queued, becomes recurring if a newer artifact revision still shows it, and is resolved only after a newer artifact load plus a complete diagnostic pass at the same viewport no longer detects it. A failed or incomplete pass preserves it as unverified rather than clearing it. The only response that arrives without user action is artifact_failures - a fatal failure that made the review surface itself unusable. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} Use --agent-reply after applying prior feedback to display your response in Lavish Editor before waiting again. ${POLL_SEND_AND_END_RULE}\n`,
-    end: `Usage: lavish-axi end <html-file>\n\nEnd a Lavish Editor session as the agent. A session ended this way still reopens normally on the next \`lavish-axi <html-file>\`, unlike a user ending it from the browser, which requires --reopen.\n`,
-    export: `Usage: lavish-axi export <html-file> [--out <path>]\n\nWrite a portable copy of an artifact: one HTML file with its LOCAL assets inlined (relative-path stylesheets, scripts, images, and fonts become inline <style>/<script> blocks and data URIs). Remote CDN/font references (https URLs) are left as links for the browser to load, so the file needs network to render those. Lavish makes no outbound requests - it only reads local files, confined to the artifact's directory. Defaults to writing <name>.export.html next to the source; pass --out to choose a path. The Lavish annotation SDK is never included in an export.\n`,
-    share: `Usage: lavish-axi share <html-file> [--password <pw>] [--token <t>]\n\nPublish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of Lavish, and print a visitable URL. Shares are PUBLIC by default: anyone with the link can open the page, and it may be indexed or scraped. Pass --password to publish a PRIVATE password-protected page; viewers must supply the password to view. Builds the same local-inlined HTML as 'export' (local assets inlined; remote CDN/font URLs left as links and are not blocked by CSP on ht-ml.app, but still load over the viewer's network), then POSTs it to ht-ml.app's /v1 API. Creating a site needs no account or API key. The response includes the url plus a secret update_key (shown once) for updating or deleting the page later. Set LAVISH_AXI_HTML_APP_TOKEN (or pass --token) to attach an optional bearer token; it is never required. The annotation SDK is never included.\n`,
-    stop: `Usage: lavish-axi stop [--port <port>]\n\nShut down the background Lavish Editor server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected.\n`,
-    playbook: `Usage: lavish-axi playbook [playbook_id]\n\nList focused artifact guidance playbooks, or show one playbook by ID. Known IDs: diagram, table, comparison, plan, code, input, slides.\n\n${PLAYBOOK_ROUTER_HELP}\n\nExamples:\n  lavish-axi playbook\n  lavish-axi playbook diagram\n  lavish-axi playbook input\n`,
-    design: `Usage: lavish-axi design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, Mermaid diagram tooling, a content-to-playbook router, an optional layout safety CSS snippet, plus technical reference for DaisyUI components. ${PLAYBOOK_ROUTER_HELP} Lavish artifacts stay portable HTML. This CDN snippet is the design fallback, not the default: inspect the subject project before falling back, and paste the layout safety CSS only when useful for dense nested grid/flex layouts, badges, wide fonts, or local media. ${DESIGN_PRIORITY_RULE}\n`,
-    setup: `Usage: lavish-axi setup hooks\n       lavish-axi setup plugin\n\nhooks: install or repair agent SessionStart hooks for lavish-axi ambient context in Claude Code, Codex, OpenCode, and GitHub Copilot CLI. Restart your agent session afterward to receive the context. This is the primary integration - it carries live session state.\n\nplugin: register the installed lavish-axi package as an Agent Plugin (agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI. The installed package directory is itself the plugin root, so nothing is downloaded and no marketplace is involved. Reload each client afterward. Codex users should use \`setup hooks\` instead.\n\nBoth actions are explicit opt-in, idempotent, and repair a stale path after a reinstall.\n`,
-    server: `Usage: lavish-axi server [--port 4387] [--verbose]\n\nRun the local Lavish Editor server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nLAVISH_AXI_HOST sets the bind address (default 127.0.0.1; a wildcard 0.0.0.0 or :: binds every interface). Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. LAVISH_AXI_LINK_HOST sets the hostname written into generated session links (default: the bind address, or loopback when bound to a wildcard). See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
+    open: `Usage: george-showroom <html-file> [--no-open] [--no-gate] [--reopen]\n\nOpen or resume a George Showroom review session for an HTML artifact. Use --no-open when you need to ensure the server/session exists without opening another browser window. Use --no-gate to skip the open-time layout curtain for this browser open. If the user explicitly ended the session from the browser, this refuses to reopen it and returns guidance instead - pass --reopen to force it open when the user asks for further review or something important needs their visual attention. Sessions ended by the agent (\`george-showroom end\`) reopen normally without the flag.\n`,
+    poll: `Usage: george-showroom poll <html-file> [--agent-reply "..."]\n\nThis command long-polls indefinitely for queued user prompts. It stays silent while it waits - that is normal, never kill it. Browser-detected layout issues do NOT return this poll: they are filed passively in the user's Layout issues inbox and arrive as an ordinary tag "layout-warnings" prompt only after the user selects them and queues the fixes. Warning lifecycle: an issue stays unresolved and counted while queued, becomes recurring if a newer artifact revision still shows it, and is resolved only after a newer artifact load plus a complete diagnostic pass at the same viewport no longer detects it. A failed or incomplete pass preserves it as unverified rather than clearing it. The only response that arrives without user action is artifact_failures - a fatal failure that made the review surface itself unusable. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} Use --agent-reply after applying prior feedback to display your response in George Showroom before waiting again. ${POLL_SEND_AND_END_RULE}\n`,
+    end: `Usage: george-showroom end <html-file>\n\nEnd a George Showroom session as the agent. A session ended this way still reopens normally on the next \`george-showroom <html-file>\`, unlike a user ending it from the browser, which requires --reopen.\n`,
+    export: `Usage: george-showroom export <html-file> [--out <path>]\n\nWrite a portable copy of an artifact: one HTML file with its LOCAL assets inlined (relative-path stylesheets, scripts, images, and fonts become inline <style>/<script> blocks and data URIs). Remote CDN/font references (https URLs) are left as links for the browser to load, so the file needs network to render those. George Showroom makes no outbound requests - it only reads local files, confined to the artifact's directory. Defaults to writing <name>.export.html next to the source; pass --out to choose a path. The George Showroom annotation SDK is never included in an export.\n`,
+    share: `Usage: george-showroom share <html-file> [--password <pw>] [--token <t>]\n\nPublish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of George Showroom, and print a visitable URL. Shares are PUBLIC by default: anyone with the link can open the page, and it may be indexed or scraped. Pass --password to publish a PRIVATE password-protected page; viewers must supply the password to view. Builds the same local-inlined HTML as 'export' (local assets inlined; remote CDN/font URLs left as links and are not blocked by CSP on ht-ml.app, but still load over the viewer's network), then POSTs it to ht-ml.app's /v1 API. Creating a site needs no account or API key. The response includes the url plus a secret update_key (shown once) for updating or deleting the page later. Set LAVISH_AXI_HTML_APP_TOKEN (or pass --token) to attach an optional bearer token; it is never required. The annotation SDK is never included.\n`,
+    stop: `Usage: george-showroom stop [--port <port>]\n\nShut down the background George Showroom server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected.\n`,
+    playbook: `Usage: george-showroom playbook [playbook_id]\n\nList focused artifact guidance playbooks, or show one playbook by ID. Known IDs: diagram, table, comparison, plan, code, input, slides.\n\n${PLAYBOOK_ROUTER_HELP}\n\nExamples:\n  george-showroom playbook\n  george-showroom playbook diagram\n  george-showroom playbook input\n`,
+    design: `Usage: george-showroom design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, Mermaid diagram tooling, a content-to-playbook router, an optional layout safety CSS snippet, plus technical reference for DaisyUI components. ${PLAYBOOK_ROUTER_HELP} George Showroom artifacts stay portable HTML. This CDN snippet is the design fallback, not the default: inspect the subject project before falling back, and paste the layout safety CSS only when useful for dense nested grid/flex layouts, badges, wide fonts, or local media. ${DESIGN_PRIORITY_RULE}\n`,
+    setup: `Usage: george-showroom setup hooks\n       george-showroom setup plugin\n\nhooks: install or repair agent SessionStart hooks for george-showroom ambient context in Claude Code, Codex, OpenCode, and GitHub Copilot CLI. Restart your agent session afterward to receive the context. This is the primary integration - it carries live session state.\n\nplugin: register the installed george-showroom package as an Agent Plugin (agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI. The installed package directory is itself the plugin root, so nothing is downloaded and no marketplace is involved. Reload each client afterward. Codex users should use \`setup hooks\` instead.\n\nBoth actions are explicit opt-in, idempotent, and repair a stale path after a reinstall.\n`,
+    server: `Usage: george-showroom server [--port 4387] [--verbose]\n\nRun the local George Showroom server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nLAVISH_AXI_HOST sets the bind address (default 127.0.0.1; a wildcard 0.0.0.0 or :: binds every interface). Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. LAVISH_AXI_LINK_HOST sets the hostname written into generated session links (default: the bind address, or loopback when bound to a wildcard). See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
   };
 }
 

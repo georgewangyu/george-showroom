@@ -11,22 +11,35 @@ import {
 } from "../src/skill.js";
 
 function skillCommandText(text) {
-  return text.replaceAll("`lavish-axi", "`npx -y lavish-axi");
+  return text;
 }
 
-test("createSkillMarkdown emits valid frontmatter naming the lavish skill", () => {
+test("createSkillMarkdown emits valid frontmatter naming the George Showroom skill", () => {
   const { frontmatter, errors } = parseSkillFrontmatter(createSkillMarkdown());
 
   assert.deepEqual(errors, [], "frontmatter parses as plain block-style YAML");
-  assert.equal(frontmatter.name, "lavish");
+  assert.equal(frontmatter.name, "george-showroom");
   assert.equal(frontmatter.description, SKILL_DESCRIPTION);
+});
+
+test("createSkillMarkdown retains a valid temporary Lavish compatibility skill", () => {
+  const markdown = createSkillMarkdown({ compatibilityAlias: true });
+  const { frontmatter, errors } = parseSkillFrontmatter(markdown);
+  const validation = validateSkillMarkdown(markdown, { directoryName: "lavish" });
+
+  assert.deepEqual(errors, []);
+  assert.equal(frontmatter.name, "lavish");
+  assert.match(markdown, /temporary `\/lavish` compatibility skill delegates to George Showroom/);
+  assert.match(markdown, /New installs and instructions should use `\/george-showroom`/);
+  assert.deepEqual(validation.errors, []);
+  assert.ok(validation.valid);
 });
 
 test("createSkillMarkdown emits Hermes Agent metadata as string-valued frontmatter", () => {
   const { frontmatter } = parseSkillFrontmatter(createSkillMarkdown());
 
   assert.deepEqual(frontmatter.metadata, {
-    author: "Kun Chen (kunchenguid)",
+    author: "George Wang (georgewangyu)",
     "argument-hint": "<what the artifact should show>",
     "hermes-tags": "html, review, artifacts, visualization",
     "hermes-category": "productivity",
@@ -37,7 +50,7 @@ test("createSkillMarkdown emits Hermes Agent metadata as string-valued frontmatt
 test("createSkillMarkdown conforms to the Agent Skills frontmatter contract", () => {
   // Agent Plugins delegates skill validity to Agent Skills and silently skips any skill
   // that fails it, so a regression here would quietly remove the skill from the plugin.
-  const { valid, errors } = validateSkillMarkdown(createSkillMarkdown(), { directoryName: "lavish" });
+  const { valid, errors } = validateSkillMarkdown(createSkillMarkdown(), { directoryName: "george-showroom" });
 
   assert.deepEqual(errors, []);
   assert.ok(valid);
@@ -71,7 +84,7 @@ test("validateSkillMarkdown rejects the shapes the reference validator rejects",
   assert.match(validateSkillMarkdown(missing).errors.join("\n"), /`description` is required/);
 });
 
-test("createSkillMarkdown handles explicit /lavish invocation arguments", () => {
+test("createSkillMarkdown handles explicit /george-showroom invocation arguments", () => {
   const md = createSkillMarkdown();
   const body = md.slice(md.indexOf("\n---\n", 4) + 5);
 
@@ -81,7 +94,7 @@ test("createSkillMarkdown handles explicit /lavish invocation arguments", () => 
 
 test("createSkillMarkdown mirrors the no-args home output", () => {
   const md = createSkillMarkdown();
-  const home = createHomeOutput({ bin: "lavish-axi", sessions: [], includeSessions: false, agent: "static" });
+  const home = createHomeOutput({ bin: "george-showroom", sessions: [], includeSessions: false, agent: "static" });
 
   assert.ok(md.includes(skillCommandText(home.description)), "includes the product description");
 
@@ -154,22 +167,19 @@ test("createSkillMarkdown omits setup guidance", () => {
   assert.doesNotMatch(md, /setup plugin/);
 });
 
-test("createSkillMarkdown uses non-interactive npx commands", () => {
+test("createSkillMarkdown uses the trusted locally installed CLI", () => {
   const md = createSkillMarkdown();
 
-  assert.match(md, /`npx -y lavish-axi <html-file>`/);
-  assert.match(md, /If lavish-axi output shows a follow-up command starting with `lavish-axi`/);
-  assert.match(md, /run it as `npx -y lavish-axi/);
-  assert.doesNotMatch(md, /`npx lavish-axi/);
-  assert.doesNotMatch(md, /Run `lavish-axi/);
+  assert.match(md, /trusted checkout installed once with `npm install --global \.`/);
+  assert.match(md, /Run `george-showroom <html-file>`/);
+  assert.match(md, /Do not use `npx -y george-showroom` until the README records an owner-approved npm release/);
+  assert.doesNotMatch(md, /Run `npx -y george-showroom/);
 });
 
 test("createSkillMarkdown documents installed-copy fallback for restricted sandboxes", () => {
   const md = createSkillMarkdown();
 
   assert.match(md, /restricted subprocess sandboxes/);
-  assert.match(md, /status 216/);
-  assert.match(md, /`node "\$\(npm root\)\/lavish-axi\/dist\/cli\.mjs" <html-file>`/);
-  assert.match(md, /`node "\$\(npm root -g\)\/lavish-axi\/dist\/cli\.mjs" <html-file>`/);
-  assert.match(md, /bare `lavish-axi <html-file>` bin/);
+  assert.match(md, /`node "\$\(npm root -g\)\/george-showroom\/dist\/cli\.mjs" <html-file>`/);
+  assert.match(md, /`lavish-axi` remains a temporary compatibility alias/);
 });

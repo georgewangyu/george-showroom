@@ -103,7 +103,7 @@ let workingBubble = null;
 let submitQueuedPromise = null;
 let submitQueuedAgain = false;
 let lastScroll = { x: 0, y: 0 };
-// In-iframe review context (an open annotation card's unsent text, Lavish-owned question
+// In-iframe review context (an open annotation card's unsent text, George Showroom-owned question
 // answers). The sandbox means the chrome cannot read it back after a reload, so the SDK reports
 // it as it changes and the chrome replays it once the new document is up.
 let lastReviewState = null;
@@ -509,7 +509,8 @@ function setLayoutGateCard(state) {
   }
 
   layoutGateTitle.innerHTML = "Checking layout.<br>One moment.";
-  layoutGateCopy.textContent = "Lavish is waiting for fonts and final geometry before revealing this artifact.";
+  layoutGateCopy.textContent =
+    "George Showroom is waiting for fonts and final geometry before revealing this artifact.";
 }
 
 function setLayoutGateActive(active) {

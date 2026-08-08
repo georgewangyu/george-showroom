@@ -5,7 +5,7 @@ import { PLAYBOOK_ROUTER_HELP } from "./playbooks.js";
 // Kept terse and outcome-focused so it fires on "about to show something visual" intents.
 export const SKILL_DESCRIPTION =
   "Turn complex or visual agent responses into rich, reviewable HTML artifacts the user can " +
-  "annotate and send feedback on, using the lavish-axi CLI. Use when about to give a plan, " +
+  "annotate and send feedback on, using the george-showroom CLI. Use when about to give a plan, " +
   "comparison, diagram, table, code diff, report, or anything easier to grasp visually than as prose.";
 
 function bullets(items) {
@@ -17,7 +17,7 @@ function playbookList(playbooks) {
 }
 
 function skillCommandText(text) {
-  return text.replaceAll("`lavish-axi", "`npx -y lavish-axi");
+  return text;
 }
 
 // Agent Skills allows only these top-level frontmatter keys; the reference validator
@@ -33,43 +33,50 @@ export const ALLOWED_SKILL_FRONTMATTER_KEYS = Object.freeze([
 ]);
 
 /**
- * Render the installable SKILL.md for the lavish skill. The body mirrors what
- * `lavish-axi` prints with no arguments (minus live session state), while the
+ * Render the installable SKILL.md for the George Showroom skill. The body mirrors what
+ * `george-showroom` prints with no arguments (minus live session state), while the
  * frontmatter adds discovery metadata for Agent Skills and Hermes Agent.
  *
  * The frontmatter is deliberately plain: block-style YAML only (the reference
  * validator rejects `[a, b]` flow collections) and string-valued `metadata`,
  * which is why the Hermes fields are flattened rather than nested.
  *
+ * @param {{ compatibilityAlias?: boolean }} [options]
  * @returns {string} full SKILL.md contents including YAML frontmatter
  */
-export function createSkillMarkdown() {
-  const home = createHomeOutput({ bin: "lavish-axi", sessions: [], includeSessions: false, agent: "static" });
+export function createSkillMarkdown({ compatibilityAlias = false } = {}) {
+  const home = createHomeOutput({ bin: "george-showroom", sessions: [], includeSessions: false, agent: "static" });
+  const skillName = compatibilityAlias ? "lavish" : "george-showroom";
+  const heading = compatibilityAlias ? "George Showroom (Lavish compatibility alias)" : "George Showroom";
+  const compatibilityNote = compatibilityAlias
+    ? "This temporary `/lavish` compatibility skill delegates to George Showroom. New installs and instructions should use `/george-showroom`.\n\n"
+    : "";
 
   return `---
-name: lavish
+name: ${skillName}
 description: ${SKILL_DESCRIPTION}
 license: MIT
 metadata:
-  author: Kun Chen (kunchenguid)
+  author: George Wang (georgewangyu)
   argument-hint: <what the artifact should show>
   hermes-tags: html, review, artifacts, visualization
   hermes-category: productivity
 ---
 
-# Lavish Editor
+# ${heading}
 
-${skillCommandText(home.description)}
+${compatibilityNote}${skillCommandText(home.description)}
 
-You do not need lavish-axi installed globally - invoke it with \`npx -y lavish-axi <html-file>\`.
-If lavish-axi output shows a follow-up command starting with \`lavish-axi\`, run it as \`npx -y lavish-axi ...\` instead.
-In restricted subprocess sandboxes, CI, or agent harnesses where \`npx -y\` exits opaquely (for example with status 216), use an already-installed copy directly: \`node "$(npm root)/lavish-axi/dist/cli.mjs" <html-file>\` for a local install, \`node "$(npm root -g)/lavish-axi/dist/cli.mjs" <html-file>\` for a global install, or the bare \`lavish-axi <html-file>\` bin after installing once.
+Originally forked from Lavish by Kun Chen; see \`UPSTREAM.md\` in the package for provenance and MIT obligations.
+
+This local milestone expects a trusted checkout installed once with \`npm install --global .\` from the George Showroom repository root, then invoked as \`george-showroom <html-file>\`.
+Do not use \`npx -y george-showroom\` until the README records an owner-approved npm release. In restricted subprocess sandboxes, CI, or agent harnesses, use the trusted installed copy directly: \`node "$(npm root -g)/george-showroom/dist/cli.mjs" <html-file>\`, or the package bin after installing once. \`lavish-axi\` remains a temporary compatibility alias.
 
 ## Request
 
 $ARGUMENTS
 
-If the request above is non-empty, the user invoked \`/lavish\` explicitly - build an HTML artifact for that request now, following the workflow below.
+If the request above is non-empty, the user invoked \`/${skillName}\` explicitly - build an HTML artifact for that request now, following the workflow below.
 If it is empty, infer what to visualize from the conversation.
 
 ## When to use
@@ -79,16 +86,16 @@ ${home.help[home.help.length - 1]}
 ## Workflow
 
 1. Create the HTML artifact (default location \`.lavish/<name>.html\` in the working directory).
-2. Run \`npx -y lavish-axi <html-file>\` to open or resume a review session in the browser.
-3. Run \`npx -y lavish-axi poll <html-file>\` to long-poll for the user's annotations and queued prompts.
+2. Run \`george-showroom <html-file>\` to open or resume a review session in the browser.
+3. Run \`george-showroom poll <html-file>\` to long-poll for the user's annotations and queued prompts.
    On the first poll, prefer \`--agent-reply "<one-line summary of what you built and what to review first>"\` so the conversation panel opens with context.
    Browser-detected layout issues are filed passively in the user's Layout issues inbox and arrive as an ordinary \`layout-warnings\` prompt only when the user selects and queues them. Never edit an issue the user has not queued. The only response that arrives without user action is \`artifact_failures\`, when the review surface itself is unusable.
    The poll stays silent until the user acts or a fatal artifact failure makes the review surface unusable - leave it running, never kill it.
    Cosmetic, intentional, transient, tiny, and uncertain observations remain silent.
 ${POLL_WAKE_PATH_RULES.map((rule) => `   ${skillCommandText(rule)}`).join("\n")}
-4. If poll returns feedback, apply the user's prompts. A \`layout-warnings\` prompt is an explicit repair request; apply every listed fix in one pass before saving, and let Lavish re-check it after a newer artifact load.
+4. If poll returns feedback, apply the user's prompts. A \`layout-warnings\` prompt is an explicit repair request; apply every listed fix in one pass before saving, and let George Showroom re-check it after a newer artifact load.
 5. Apply human feedback, then poll again with \`--agent-reply "<message>"\` to reply in the browser and keep the loop going under the same foreground-or-verified-wake-path rule.
-6. Run \`npx -y lavish-axi end <html-file>\` when the review is finished.
+6. Run \`george-showroom end <html-file>\` when the review is finished.
 7. ${POLL_SEND_AND_END_RULE} Deliver any remaining updates directly in this conversation.
 
 ## Visual guidance
@@ -97,9 +104,9 @@ ${bullets(home.visual_guidance)}
 
 ## Playbooks
 
-Run \`npx -y lavish-axi playbook <id>\` for focused, detailed guidance on any of these.
+Run \`george-showroom playbook <id>\` for focused, detailed guidance on any of these.
 ${PLAYBOOK_ROUTER_HELP}
-For flows, architecture, state, or sequence diagrams, do not hand-build boxes-and-arrows from div/flexbox; open the diagram playbook and use the theme-aware Mermaid snippet from \`npx -y lavish-axi design\` unless SVG is needed for richly annotated nodes.
+For flows, architecture, state, or sequence diagrams, do not hand-build boxes-and-arrows from div/flexbox; open the diagram playbook and use the theme-aware Mermaid snippet from \`george-showroom design\` unless SVG is needed for richly annotated nodes.
 
 ${playbookList(home.playbooks)}
 

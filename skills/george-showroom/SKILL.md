@@ -1,5 +1,5 @@
 ---
-name: lavish
+name: george-showroom
 description: Turn complex or visual agent responses into rich, reviewable HTML artifacts the user can annotate and send feedback on, using the george-showroom CLI. Use when about to give a plan, comparison, diagram, table, code diff, report, or anything easier to grasp visually than as prose.
 license: MIT
 metadata:
@@ -9,9 +9,7 @@ metadata:
   hermes-category: productivity
 ---
 
-# George Showroom (Lavish compatibility alias)
-
-This temporary `/lavish` compatibility skill delegates to George Showroom. New installs and instructions should use `/george-showroom`.
+# George Showroom
 
 George Showroom helps agents turn rich HTML artifacts into collaborative human review surfaces. Whenever you are about to give user a complex response that will be easier to understand via a rich / interactive page, consider using George Showroom. First generate an interactive HTML artifact according to user request, then run `george-showroom <html-file>` so the user can visually review it, annotate elements or selected text, queue prompts, and send feedback back through `george-showroom poll`.
 
@@ -24,7 +22,7 @@ Do not use `npx -y george-showroom` until the README records an owner-approved n
 
 $ARGUMENTS
 
-If the request above is non-empty, the user invoked `/lavish` explicitly - build an HTML artifact for that request now, following the workflow below.
+If the request above is non-empty, the user invoked `/george-showroom` explicitly - build an HTML artifact for that request now, following the workflow below.
 If it is empty, infer what to visualize from the conversation.
 
 ## When to use

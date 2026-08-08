@@ -1,19 +1,21 @@
 {
-  "name": "lavish-axi",
+  "name": "george-showroom",
   "version": "0.1.46",
   "packageManager": "pnpm@11.1.1",
-  "description": "HTML is the new markdown. Lavish is the new editor for your HTML artifacts.",
+  "description": "A local, visual review surface for agent-generated HTML artifacts.",
   "type": "module",
   "bin": {
+    "george-showroom": "dist/cli.mjs",
     "lavish-axi": "dist/cli.mjs"
   },
   "files": [
     "dist",
     "plugin.json",
+    "skills/george-showroom",
     "skills/lavish",
-    "lavish-editor-marketing/renders/lavish-editor-marketing.gif",
     "LICENSE",
     "THIRD-PARTY-NOTICES.md",
+    "UPSTREAM.md",
     "README.md"
   ],
   "scripts": {
@@ -64,17 +66,29 @@
     "cli",
     "html",
     "review",
-    "collaboration"
+    "collaboration",
+    "codex",
+    "showroom"
+  ],
+  "author": {
+    "name": "George Wang",
+    "url": "https://github.com/georgewangyu"
+  },
+  "contributors": [
+    {
+      "name": "Kun Chen",
+      "url": "https://github.com/kunchenguid"
+    }
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kunchenguid/lavish-axi.git"
+    "url": "git+https://github.com/georgewangyu/george-showroom.git"
   },
   "bugs": {
-    "url": "https://github.com/kunchenguid/lavish-axi/issues"
+    "url": "https://github.com/georgewangyu/george-showroom/issues"
   },
-  "homepage": "https://github.com/kunchenguid/lavish-axi#readme",
+  "homepage": "https://github.com/georgewangyu/george-showroom#readme",
   "publishConfig": {
     "access": "public"
   }

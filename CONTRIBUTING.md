@@ -16,9 +16,9 @@ The release and dependency bots are exempt so their automation keeps working, bu
 
 Fork routing requires `no-mistakes` v1.30.1 or newer.
 
-1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent repo (`git@github.com:kunchenguid/lavish-axi.git`).
+1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent repo (`git@github.com:georgewangyu/george-showroom.git`).
 2. Create a branch and make your changes.
-3. Initialize or refresh the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/lavish-axi.git`.
+3. Initialize or refresh the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/george-showroom.git`.
 4. Commit your changes.
 5. Push through the gate instead of pushing to `origin`:
 
@@ -37,8 +37,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Run `pnpm run check` before pushing.
 - Do not reformat repo-provided `.agents/` skill content; `.prettierignore` excludes it intentionally.
 - Do not hand-edit `CHANGELOG.md` or `.release-please-manifest.json`.
-- User-facing telemetry docs should stay minimal: anonymous usage telemetry, no sensitive content, and `LAVISH_AXI_TELEMETRY=0` opt-out.
+- Telemetry stays fail-closed: both an endpoint and website ID must be explicitly configured, no sensitive content is sent, and `LAVISH_AXI_TELEMETRY=0` remains the compatibility opt-out.
 
 ## Questions
 
-Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).
+Open an issue in [georgewangyu/george-showroom](https://github.com/georgewangyu/george-showroom/issues).

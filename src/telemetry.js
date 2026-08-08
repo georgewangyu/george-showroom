@@ -1,7 +1,6 @@
-const HARDCODED_FALLBACK_HOST = "https://a.kunchenguid.com";
 const UMAMI_PATH = "/api/send";
 const DEFAULT_HOSTNAME = "cli";
-const DEFAULT_TITLE = "Lavish Editor CLI";
+const DEFAULT_TITLE = "George Showroom CLI";
 const DEFAULT_REQUEST_TIMEOUT_MS = 1_000;
 
 export function resolveTelemetryConfig(input) {
@@ -13,12 +12,11 @@ export function resolveTelemetryConfig(input) {
   }
 
   const websiteID = String(input.env.LAVISH_AXI_UMAMI_WEBSITE_ID || "").trim() || input.buildWebsiteID.trim();
-  if (!websiteID) {
+  const host = String(input.env.LAVISH_AXI_UMAMI_HOST || "").trim() || input.buildHost.trim();
+  if (!websiteID || !host) {
     return { enabled: false, host: "", websiteID: "" };
   }
 
-  const host =
-    String(input.env.LAVISH_AXI_UMAMI_HOST || "").trim() || input.buildHost.trim() || HARDCODED_FALLBACK_HOST;
   return { enabled: true, host, websiteID };
 }
 

@@ -7,7 +7,7 @@ const packageJson = JSON.parse(await readFile(new URL("../package.json", import.
 await mkdir("dist", { recursive: true });
 
 await esbuild.build({
-  entryPoints: ["bin/lavish-axi.js"],
+  entryPoints: ["bin/george-showroom.js"],
   outfile: "dist/cli.mjs",
   bundle: true,
   packages: "external",

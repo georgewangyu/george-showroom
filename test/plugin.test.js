@@ -25,6 +25,7 @@ import {
   linkCursorLocalPlugin,
   normalizeRepositoryUrl,
   readPluginManifest,
+  removeLegacyCursorPluginLinks,
   resolveCursorLocalPluginsDir,
   resolvePluginRoot,
   resolveVsCodeSettingsFile,
@@ -132,13 +133,15 @@ test("the package root is itself a discoverable Agent Plugin", async () => {
     (entry) => entry.isDirectory() && existsSync(path.join(root, "skills", entry.name, "SKILL.md")),
   );
   assert.deepEqual(
-    discovered.map((entry) => entry.name),
-    ["lavish"],
-    "exactly the lavish skill is discovered",
+    discovered.map((entry) => entry.name).sort(),
+    ["george-showroom", "lavish"],
+    "the primary skill and temporary compatibility alias are discovered",
   );
 
-  const skill = await readFile(path.join(root, "skills", "lavish", "SKILL.md"), "utf8");
-  assert.deepEqual(validateSkillMarkdown(skill, { directoryName: "lavish" }).errors, []);
+  for (const directoryName of ["george-showroom", "lavish"]) {
+    const skill = await readFile(path.join(root, "skills", directoryName, "SKILL.md"), "utf8");
+    assert.deepEqual(validateSkillMarkdown(skill, { directoryName }).errors, []);
+  }
 });
 
 test("the plugin declares no MCP servers", async () => {
@@ -188,6 +191,39 @@ test("a removed install directory is only treated as stale when it was ours", ()
   const dir = tempDir();
   assert.equal(isStalePluginLocation(path.join(dir, "gone", "lavish-axi"), "lavish-axi"), true);
   assert.equal(isStalePluginLocation(path.join(dir, "gone", "someone-else"), "lavish-axi"), false);
+});
+
+test("George Showroom registration treats Lavish plugin locations as attributable legacy entries", () => {
+  const dir = tempDir();
+  const legacy = writePlugin(path.join(dir, "old", "lavish-axi"), "lavish-axi");
+  const current = writePlugin(path.join(dir, "new", "george-showroom"), "george-showroom");
+  const foreign = writePlugin(path.join(dir, "other"), "other-plugin");
+  const [updated] = computeVsCodePluginLocationsUpdate(
+    { "chat.pluginLocations": { [legacy]: true, [foreign]: true } },
+    current,
+    "george-showroom",
+  );
+
+  assert.equal(updated["chat.pluginLocations"][legacy], undefined);
+  assert.equal(updated["chat.pluginLocations"][current], true);
+  assert.equal(updated["chat.pluginLocations"][foreign], true);
+});
+
+test("Cursor migration removes only an attributable legacy symlink", { skip: symlinkSupport.skip }, () => {
+  const dir = tempDir();
+  const localPlugins = path.join(dir, "local");
+  const legacyRoot = writePlugin(path.join(dir, "pkg", "lavish-axi"), "lavish-axi");
+  mkdirSync(localPlugins, { recursive: true });
+  const legacyLink = path.join(localPlugins, "lavish-axi");
+  symlinkSync(legacyRoot, legacyLink);
+
+  assert.deepEqual(removeLegacyCursorPluginLinks(localPlugins, "george-showroom"), [legacyLink]);
+  assert.equal(existsSync(legacyLink), false);
+
+  mkdirSync(legacyLink, { recursive: true });
+  writeFileSync(path.join(legacyLink, "keep.txt"), "user content");
+  assert.deepEqual(removeLegacyCursorPluginLinks(localPlugins, "george-showroom"), []);
+  assert.equal(existsSync(path.join(legacyLink, "keep.txt")), true);
 });
 
 test("Cursor registration links, no-ops, and repairs the local plugin slot", { skip: symlinkSupport.skip }, () => {

@@ -23,9 +23,6 @@ const crossSpawn = createRequire(import.meta.url)("cross-spawn");
 // Clients select their local validation rules from this string; they never fetch it.
 export const PLUGIN_SCHEMA_URL = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
 
-// Not in package.json (npm infers no author), so the one authoritative copy lives here.
-const PLUGIN_AUTHOR = Object.freeze({ name: "Kun Chen", url: "https://github.com/kunchenguid" });
-
 export function spawnPluginClientSync(command, args) {
   return crossSpawn.sync(command, args, { encoding: "utf8" });
 }
@@ -67,13 +64,24 @@ export function createPluginManifest(packageJson) {
     name: packageJson.name,
     version: packageJson.version,
     description: packageJson.description,
-    author: PLUGIN_AUTHOR,
+    author: normalizePackageAuthor(packageJson.author),
     homepage: packageJson.homepage,
     // The schema wants a plain URL string; package.json carries npm's `git+….git` form.
     repository: normalizeRepositoryUrl(packageJson.repository),
     license: packageJson.license,
     keywords: packageJson.keywords,
   };
+}
+
+/** @param {unknown} author npm author metadata */
+function normalizePackageAuthor(author) {
+  if (typeof author === "string") return { name: author };
+  if (!author || typeof author !== "object") return undefined;
+  return Object.fromEntries(
+    ["name", "email", "url"]
+      .map((key) => [key, author[key]])
+      .filter(([, value]) => typeof value === "string" && value !== ""),
+  );
 }
 
 /**
@@ -131,8 +139,29 @@ export function readPluginManifest(root) {
  */
 export function isStalePluginLocation(candidate, pluginName) {
   const manifest = readPluginManifest(candidate);
-  if (manifest) return manifest.name === pluginName;
-  return !existsSync(candidate) && path.basename(candidate) === pluginName;
+  const attributableNames = pluginName === "george-showroom" ? ["george-showroom", "lavish-axi"] : [pluginName];
+  if (manifest) return attributableNames.includes(manifest.name);
+  return !existsSync(candidate) && attributableNames.includes(path.basename(candidate));
+}
+
+/**
+ * Remove only legacy Cursor links that can be positively attributed to this plugin.
+ * Real directories are never touched, and this runs only after the new link succeeds.
+ */
+export function removeLegacyCursorPluginLinks(localPluginsDir, pluginName, operations = {}) {
+  if (pluginName !== "george-showroom") return [];
+  const remove = operations.rmSync || rmSync;
+  const removed = [];
+  const legacyTarget = path.join(localPluginsDir, "lavish-axi");
+  try {
+    if (!lstatSync(legacyTarget).isSymbolicLink()) return removed;
+    if (!isStalePluginLocation(legacyTarget, pluginName)) return removed;
+    remove(legacyTarget, { force: true });
+    removed.push(legacyTarget);
+  } catch {
+    // Missing, unreadable, or unattributable legacy entries are preserved.
+  }
+  return removed;
 }
 
 /**

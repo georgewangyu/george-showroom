@@ -19,15 +19,29 @@ test("check script runs all verification commands", async () => {
 
 test("installable skill stays in sync with the no-args home output", async () => {
   const { createSkillMarkdown } = await import("../src/skill.js");
-  const committed = await readFile(new URL("../skills/lavish/SKILL.md", import.meta.url), "utf8");
+  const [committed, compatibilityAlias] = await Promise.all([
+    readFile(new URL("../skills/george-showroom/SKILL.md", import.meta.url), "utf8"),
+    readFile(new URL("../skills/lavish/SKILL.md", import.meta.url), "utf8"),
+  ]);
 
   assert.equal(committed, createSkillMarkdown(), "run `npm run build:skill` and commit the result");
+  assert.equal(
+    compatibilityAlias,
+    createSkillMarkdown({ compatibilityAlias: true }),
+    "run `npm run build:skill` and commit the result",
+  );
 });
 
 test("published package includes the installable skill", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
+  assert.ok(packageJson.files.includes("skills/george-showroom"));
   assert.ok(packageJson.files.includes("skills/lavish"));
+  assert.equal(
+    packageJson.files.some((entry) => entry.includes("lavish-editor-marketing")),
+    false,
+    "the inherited Lavish-branded hero media is not shipped as George Showroom product media",
+  );
 });
 
 test("published package root is a complete Agent Plugin", async () => {
@@ -36,12 +50,14 @@ test("published package root is a complete Agent Plugin", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
   assert.ok(packageJson.files.includes("plugin.json"));
+  assert.ok(packageJson.files.includes("skills/george-showroom"));
   assert.ok(packageJson.files.includes("skills/lavish"));
 });
 
 test("release-please keeps the plugin manifest version in step with the package", async () => {
   const config = JSON.parse(await readFile(new URL("../release-please-config.json", import.meta.url), "utf8"));
 
+  assert.equal(config.packages["."]["package-name"], "george-showroom");
   assert.deepEqual(config.packages["."]["extra-files"], [{ type: "json", path: "plugin.json", jsonpath: "$.version" }]);
 });
 
@@ -53,8 +69,8 @@ test("lavish-design agent skill is marked internal for skills CLI discovery", as
   assert.match(frontmatter, /^metadata:\n {2}internal: true$/m);
 });
 
-test("public lavish skill is not marked internal", async () => {
-  const skillMd = await readFile(new URL("../skills/lavish/SKILL.md", import.meta.url), "utf8");
+test("public George Showroom skill is not marked internal", async () => {
+  const skillMd = await readFile(new URL("../skills/george-showroom/SKILL.md", import.meta.url), "utf8");
   const frontmatter = skillMd.slice(4, skillMd.indexOf("\n---\n", 4));
 
   assert.doesNotMatch(frontmatter, /^metadata:\n {2}internal: true$/m);
@@ -71,9 +87,9 @@ test("build copies local design assets for published artifact injection", async 
 test("package metadata matches the GitHub repository used for npm provenance", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
-  assert.equal(packageJson.repository.url, "git+https://github.com/kunchenguid/lavish-axi.git");
-  assert.equal(packageJson.bugs.url, "https://github.com/kunchenguid/lavish-axi/issues");
-  assert.equal(packageJson.homepage, "https://github.com/kunchenguid/lavish-axi#readme");
+  assert.equal(packageJson.repository.url, "git+https://github.com/georgewangyu/george-showroom.git");
+  assert.equal(packageJson.bugs.url, "https://github.com/georgewangyu/george-showroom/issues");
+  assert.equal(packageJson.homepage, "https://github.com/georgewangyu/george-showroom#readme");
 });
 
 test("pnpm lock root importer matches the publish manifest", async () => {
@@ -97,11 +113,9 @@ test("release workflow publishes from the release tag checkout", async () => {
   );
 });
 
-test("release workflow keeps telemetry env during npm publish prepack", async () => {
+test("release workflow does not inherit the upstream telemetry endpoint", async () => {
   const workflow = await readFile(new URL("../.github/workflows/release-please.yml", import.meta.url), "utf8");
 
-  assert.match(
-    workflow,
-    /run: npm publish --access public --provenance\n\s+if: \$\{\{ steps\.release\.outputs\.release_created \}\}\n\s+env:\n\s+LAVISH_AXI_UMAMI_HOST: https:\/\/a\.kunchenguid\.com\n\s+LAVISH_AXI_UMAMI_WEBSITE_ID: \$\{\{ vars\.LAVISH_AXI_UMAMI_WEBSITE_ID \}\}/,
-  );
+  assert.doesNotMatch(workflow, /a\.kunchenguid\.com/);
+  assert.doesNotMatch(workflow, /LAVISH_AXI_(?:BUILD_)?UMAMI_/);
 });

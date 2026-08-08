@@ -272,6 +272,8 @@ test("the configured diagnostic viewport set falls back to every class", () => {
 test("the queued prompt payload carries bounded structured warning detail", () => {
   const detected = detect([OVERFLOW, CLIPPED], { revision: 2 });
   const payload = layoutWarningPromptPayload(detected);
+  assert.match(payload.prompt, /George Showroom only marks it resolved/);
+  assert.doesNotMatch(payload.prompt, /Lavish only marks it resolved/);
 
   assert.match(payload.prompt, /Fix these 2 layout issues/);
   assert.match(payload.prompt, new RegExp(detected[0].id));
