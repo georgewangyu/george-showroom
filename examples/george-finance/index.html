@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en" data-lavish-live-reload-root>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Local Finance — Synthetic pilot</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230d110f' stroke='%23b7ed8d' stroke-width='2'/%3E%3Ctext x='32' y='38' text-anchor='middle' font-family='Arial' font-size='18' font-weight='700' fill='%23b7ed8d'%3EGF%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="dashboard.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar reveal" data-delay="0">
+        <a class="brand" href="#overview" aria-label="Local Finance home">
+          <span class="brand-mark" aria-hidden="true">GF</span>
+          <span>Local Finance</span>
+        </a>
+        <div class="topbar-meta">
+          <span class="data-badge" id="classification-label">Loading data</span>
+          <span class="freshness" id="freshness-label">Loading snapshot…</span>
+        </div>
+      </header>
+
+      <section class="error-panel" id="error-panel" role="alert" hidden>
+        <span class="eyebrow">Snapshot unavailable</span>
+        <h1 id="error-title">The finance view could not load.</h1>
+        <p id="error-copy">Check the local snapshot and refresh this page.</p>
+      </section>
+
+      <div id="dashboard" hidden>
+        <section class="intro reveal" id="overview" data-delay="40">
+          <div>
+            <p class="eyebrow">Financial position</p>
+            <h1>A calm read on what is moving.</h1>
+          </div>
+          <p class="intro-note">Monthly signal over daily noise. Amounts are rounded for decisions, not dopamine.</p>
+        </section>
+
+        <section class="hero-grid">
+          <article class="panel net-worth reveal" data-delay="90">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Net worth</p>
+                <p class="hero-number" id="net-worth">—</p>
+              </div>
+              <span class="as-of" id="data-as-of">As of —</span>
+            </div>
+            <div class="position-bar" aria-label="Assets compared with debt">
+              <span class="position-assets" id="asset-bar"></span>
+              <span class="position-debt" id="debt-bar"></span>
+            </div>
+            <div class="position-legend">
+              <div>
+                <span class="legend-dot cash-dot"></span>
+                <span>Cash</span>
+                <strong id="cash-total">—</strong>
+              </div>
+              <div>
+                <span class="legend-dot investment-dot"></span>
+                <span>Investments</span>
+                <strong id="investment-total">—</strong>
+              </div>
+              <div>
+                <span class="legend-dot debt-dot"></span>
+                <span>Debt</span>
+                <strong id="debt-total">—</strong>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel cash-flow reveal" data-delay="140">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Monthly cash flow</p>
+                <p class="section-number positive" id="cash-flow">—</p>
+              </div>
+              <span class="period-pill" id="cash-flow-period">—</span>
+            </div>
+            <div class="flow-equation" aria-label="Income minus spending equals cash flow">
+              <div><span>Income</span><strong id="monthly-income">—</strong></div>
+              <span class="operator" aria-hidden="true">−</span>
+              <div><span>Spending</span><strong id="monthly-spending">—</strong></div>
+              <span class="operator" aria-hidden="true">=</span>
+              <div class="flow-result"><span>Kept</span><strong id="kept-rate">—</strong></div>
+            </div>
+            <p class="panel-note">A planning snapshot—not a promise about future months.</p>
+          </article>
+        </section>
+
+        <section class="detail-grid">
+          <article class="panel spending reveal" data-delay="190">
+            <div class="panel-heading compact">
+              <div>
+                <p class="eyebrow">Spending</p>
+                <h2>Where this month went</h2>
+              </div>
+              <strong class="mini-total" id="spending-total">—</strong>
+            </div>
+            <div class="category-list" id="category-list"></div>
+          </article>
+
+          <article class="panel debt-card reveal" data-delay="240">
+            <div class="panel-heading compact">
+              <div>
+                <p class="eyebrow">Debt</p>
+                <h2>Obligations, without alarm</h2>
+              </div>
+              <strong class="mini-total" id="debt-card-total">—</strong>
+            </div>
+            <div class="debt-list" id="debt-list"></div>
+          </article>
+
+          <article class="panel dti-card reveal" data-delay="290">
+            <div class="panel-heading compact">
+              <div>
+                <p class="eyebrow">Income to debt</p>
+                <h2>Required-payment load</h2>
+              </div>
+              <span class="monthly-label">Monthly</span>
+            </div>
+            <div class="dti-layout">
+              <div class="dti-gauge" id="dti-gauge" role="img" aria-label="Debt-to-income ratio">
+                <span id="dti-value">—</span>
+                <small>DTI</small>
+              </div>
+              <div class="coverage-copy">
+                <strong id="coverage-value">—</strong>
+                <span>income coverage</span>
+                <p id="dti-explanation">Waiting for a monthly metric.</p>
+              </div>
+            </div>
+            <div class="trend" id="dti-trend" aria-label="Three month DTI trend"></div>
+            <details>
+              <summary>How to read this calmly</summary>
+              <p>
+                DTI is required monthly debt payments divided by verified gross monthly income. Review the range and
+                direction monthly—not every transaction.
+              </p>
+            </details>
+          </article>
+        </section>
+
+        <footer class="footer reveal" data-delay="340">
+          <span id="source-summary">—</span>
+          <span>Aggregate-only snapshot · no account or merchant details</span>
+        </footer>
+      </div>
+    </main>
+    <script src="finance-snapshot.js"></script>
+    <script src="dashboard.js"></script>
+  </body>
+</html>
