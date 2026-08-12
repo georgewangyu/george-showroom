@@ -2,6 +2,7 @@ dist
 node_modules
 .lavish
 .lavish-axi
+.playwright-cli
 .no-mistakes
 lavish-code-review.html
 package-lock.json
