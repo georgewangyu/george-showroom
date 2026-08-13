@@ -70,9 +70,15 @@ test("post-production example treats visual rhythm as job-based evidence, not a 
   assert.match(html, /not a universal cut-rate target/i);
   assert.match(html, /40 <small>changes/);
   assert.match(html, /58 <small>changes/);
-  assert.match(html, /Accessibility captions stay separate from semantic text/i);
+  assert.match(html, /corrected accessibility track/i);
   assert.match(html, /intentional quiet or reset beat/i);
   assert.match(html, /decoded editorial render/i);
+  for (const role of ["caption.spoken", "signal.headline", "signal.impact", "proof.label", "bridge.next"]) {
+    assert.match(html, asPattern(role));
+  }
+  assert.match(html, /One foreground message/i);
+  assert.match(html, /without burning the full transcript/i);
+  assert.match(html, /Accessibility-track-only correction/i);
 });
 
 test("review controls queue exact gate and branch targets without inventing native timecode", async () => {

@@ -18,4 +18,4 @@ Wide screens retain rail, table, and lane relationships. Narrow screens collapse
 
 ## Content boundary
 
-All names, states, and examples are synthetic and creator-neutral. No private project, footage, title, account, local path, task identity, or personal metadata belongs in this fixture.
+All names, states, and examples are synthetic and creator-neutral. Functional text-role names are shown without private styling, timing, geometry, or density values. No private project, footage, title, account, local path, task identity, or personal metadata belongs in this fixture.

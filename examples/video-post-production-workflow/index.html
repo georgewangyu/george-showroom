@@ -334,6 +334,14 @@
           ><b>synthesis</b>
         </div>
 
+        <div class="text-role-strip" role="list" aria-label="Five functional text roles">
+          <span role="listitem"><b>caption.spoken</b> accessible speech</span>
+          <span role="listitem"><b>signal.headline</b> premise or turn</span>
+          <span role="listitem"><b>signal.impact</b> decisive number or payoff</span>
+          <span role="listitem"><b>proof.label</b> visible evidence identity</span>
+          <span role="listitem"><b>bridge.next</b> specific continuation</span>
+        </div>
+
         <div class="rhythm__audit">
           <article data-rhythm-target="hook">
             <span>G1–G3 · HOOK / ASSEMBLY</span>
@@ -360,8 +368,8 @@
             <h3>Verify the pixels and the reset</h3>
             <ul>
               <li>Rhythm/timing edits create a new lock version</li>
-              <li>Accessibility captions stay separate from semantic text</li>
-              <li>Semantic role: headline, impact, proof label, or CTA</li>
+              <li>Signal-first keeps a corrected accessibility track without burning the full transcript</li>
+              <li>One foreground message; a proof label may only identify visible evidence</li>
               <li>Inspect decoded pixels, final audio, and delivery size</li>
             </ul>
           </article>
@@ -498,8 +506,12 @@
             <p>Editorial, turnovers, time-based finish, master approval, and delivery expire.</p>
           </article>
           <article>
-            <span>Graphic / caption / text</span><strong>Reopen affected finish</strong>
-            <p>Issue a new lock too when geometry or timing changes.</p>
+            <span>Semantic signal / burned-in caption</span><strong>New lock if pixels move</strong>
+            <p>Copy, timing, or geometry changes reopen the affected turnover and finish.</p>
+          </article>
+          <article>
+            <span>Accessibility-track-only correction</span><strong>Reopen caption + master QC</strong>
+            <p>Picture lock survives only when picture, audio duration, and encode layout stay unchanged.</p>
           </article>
           <article>
             <span>Dialogue / SFX / music</span><strong>Reopen mix + audio QC</strong>

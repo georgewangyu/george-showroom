@@ -2,6 +2,8 @@
 
 This public-safe synthetic fixture visualizes five creator decision gates over seven professional post-production stages, plus a measured visual-rhythm case study that remains a candidate benchmark rather than a cut-rate default. It contains no private footage, project identity, local path, task identifier, account data, or personal metadata.
 
+The five text-role names express creator-neutral editorial jobs. No private palette, font, motion timing, safe-zone value, frequency target, or creator preset is embedded.
+
 Open it with the built George Showroom CLI:
 
 ```bash
