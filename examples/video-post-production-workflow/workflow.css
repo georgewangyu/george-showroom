@@ -467,6 +467,100 @@ h1 em {
     0.7rem ui-monospace,
     monospace;
 }
+.stage-strip {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin: 1.5rem 0 0 4rem;
+}
+.stage-strip span {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+.stage-strip b {
+  display: block;
+  margin-bottom: 0.3rem;
+  color: var(--lime);
+  font-family: ui-monospace, monospace;
+}
+
+.rhythm__metrics,
+.rhythm__audit {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+.rhythm__metrics article,
+.rhythm__audit article {
+  min-width: 0;
+  padding: 1.35rem;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.rhythm__metrics span,
+.rhythm__audit span {
+  color: var(--lime);
+  font:
+    800 0.58rem ui-monospace,
+    monospace;
+  letter-spacing: 0.1em;
+}
+.rhythm__metrics strong {
+  display: block;
+  margin: 0.7rem 0 0.35rem;
+  color: var(--coral);
+  font-size: clamp(2.8rem, 5vw, 5rem);
+  line-height: 0.9;
+}
+.rhythm__metrics small {
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.rhythm__metrics p,
+.rhythm__note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+.rhythm__grammar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--coral);
+  background: rgba(255, 118, 87, 0.08);
+}
+.rhythm__grammar b {
+  font-size: 0.78rem;
+}
+.rhythm__grammar span {
+  color: var(--coral);
+}
+.rhythm__audit h3 {
+  margin: 0.7rem 0 0.8rem;
+}
+.rhythm__audit ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.65;
+}
+.rhythm__note {
+  margin-top: 1rem;
+  padding-left: 1rem;
+  border-left: 3px solid var(--cyan);
+}
 
 .format-tabs {
   display: flex;
@@ -917,6 +1011,10 @@ h1 em {
   .gate-status {
     margin-left: 2rem;
   }
+  .stage-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-left: 2rem;
+  }
   .format-panel__header {
     display: grid;
   }
@@ -924,6 +1022,8 @@ h1 em {
     text-align: left;
   }
   .format-panel__grid,
+  .rhythm__metrics,
+  .rhythm__audit,
   .vlog-callout,
   .review-semantics__model,
   .ceremony__grid,
@@ -961,6 +1061,9 @@ h1 em {
     justify-content: flex-start;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+  .stage-strip {
+    grid-template-columns: 1fr;
   }
   .sources__grid a,
   .page-footer {

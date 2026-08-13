@@ -1,6 +1,6 @@
 # Video post-production workflow benchmark
 
-This public-safe synthetic fixture visualizes a creator-scale post-production benchmark. It contains no private footage, project identity, local path, task identifier, account data, or personal metadata.
+This public-safe synthetic fixture visualizes five creator decision gates over seven professional post-production stages, plus a measured visual-rhythm case study that remains a candidate benchmark rather than a cut-rate default. It contains no private footage, project identity, local path, task identifier, account data, or personal metadata.
 
 Open it with the built George Showroom CLI:
 

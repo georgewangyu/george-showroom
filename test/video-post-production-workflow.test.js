@@ -5,20 +5,20 @@ import test from "node:test";
 const example = new URL("../examples/video-post-production-workflow/", import.meta.url);
 const asPattern = (value) => new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 
-test("post-production example exposes the seven gates and picture-lock hinge", async () => {
+test("post-production example exposes five creator decisions over seven stages", async () => {
   const html = await readFile(new URL("index.html", example), "utf8");
 
-  for (const gate of [
-    "Brief + story promise",
-    "Ingest + source safety",
-    "Dailies + selects",
-    "Story + assembly",
-    "Rough / fine editorial",
-    "Picture lock + turnover",
-    "Finishing + master approval",
+  for (const decision of [
+    "Click + story promise",
+    "Footage reality",
+    "Intro + story assembly",
+    "Editorial approval → picture lock",
+    "Master + package approval",
   ]) {
-    assert.match(html, asPattern(gate));
+    assert.match(html, asPattern(decision));
   }
+
+  for (let stage = 1; stage <= 7; stage += 1) assert.match(html, new RegExp(`S${stage}`));
 
   assert.match(html, /Picture lock is the hinge/i);
   assert.match(html, /Editorial approval/);
@@ -63,11 +63,24 @@ test("post-production example distinguishes planning from execution and maps inv
   assert.match(html, /Skip the bureaucracy/i);
 });
 
+test("post-production example treats visual rhythm as job-based evidence, not a quota", async () => {
+  const html = await readFile(new URL("index.html", example), "utf8");
+
+  assert.match(html, /Every change needs an argument job/i);
+  assert.match(html, /not a universal cut-rate target/i);
+  assert.match(html, /40 <small>changes/);
+  assert.match(html, /58 <small>changes/);
+  assert.match(html, /Accessibility captions stay separate from semantic text/i);
+  assert.match(html, /intentional quiet or reset beat/i);
+  assert.match(html, /decoded editorial render/i);
+});
+
 test("review controls queue exact gate and branch targets without inventing native timecode", async () => {
   const html = await readFile(new URL("index.html", example), "utf8");
   const script = await readFile(new URL("workflow.js", example), "utf8");
 
-  assert.match(html, /data-gate-id="G[1-7]"/);
+  for (let gate = 1; gate <= 5; gate += 1) assert.match(html, new RegExp(`data-gate-id="G${gate}"`));
+  assert.doesNotMatch(html, /data-gate-id="G[67]"/);
   assert.match(html, /data-branch-id="vertical-reaction"/);
   assert.match(html, /data-lavish-question="workflow-model-review"/);
   assert.match(html, /The SDK queues prompts; the artifact supplies editorial semantics/i);

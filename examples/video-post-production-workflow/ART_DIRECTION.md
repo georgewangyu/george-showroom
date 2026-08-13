@@ -2,7 +2,7 @@
 
 ## Concept
 
-An editorial control room crossed with a marked-up edit decision board. The visual hinge is the coral picture-lock block between provisional editorial lanes and final finishing lanes.
+An editorial control room crossed with a marked-up edit decision board. Five creator decisions sit over seven professional stages; the visual hinge is the coral picture-lock block between provisional editorial lanes and final finishing lanes.
 
 ## System
 

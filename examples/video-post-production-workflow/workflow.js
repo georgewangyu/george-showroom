@@ -118,8 +118,8 @@ decisionForm?.addEventListener("submit", (event) => {
   event.preventDefault();
   const model = new FormData(decisionForm).get("model");
   const labels = {
-    "seven-gates": "Pilot the seven explicit gates",
-    "four-rooms-seven-gates": "Use four navigation rooms with seven approval gates",
+    "five-decisions-seven-stages": "Pilot five creator decisions over seven professional stages",
+    "four-rooms-five-decisions": "Use four navigation rooms with five creator decisions and seven stages",
     "needs-correction": "Correct the model before a pilot",
   };
   const queued = queuePrompt(
