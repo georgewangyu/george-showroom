@@ -85,7 +85,7 @@ ${home.help[home.help.length - 1]}
 
 ## Workflow
 
-1. Create the HTML artifact (default location \`.lavish/<name>.html\` in the working directory).
+1. Create the HTML artifact (default location \`georgesshowroom/<name>.html\` in the working directory).
 2. Run \`george-showroom <html-file>\` to open or resume a review session in the browser.
 3. Run \`george-showroom poll <html-file>\` to long-poll for the user's annotations and queued prompts.
    On the first poll, prefer \`--agent-reply "<one-line summary of what you built and what to review first>"\` so the conversation panel opens with context.

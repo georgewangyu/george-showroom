@@ -149,7 +149,8 @@ test("home output teaches agents when and how to use George Showroom", () => {
     "Must be used when the agent needs to collect user input on decisions, choices, preferences, triage, scope, or other structured feedback from within the artifact",
   );
   assert.ok(output.help.some((item) => item.includes("george-showroom <html-file>")));
-  assert.ok(output.help.some((item) => item.includes("`.lavish/`")));
+  assert.ok(output.help.some((item) => item.includes("`georgesshowroom/`")));
+  assert.ok(!output.help.some((item) => item.includes("`.lavish/`")));
   assert.ok(output.help.some((item) => item.includes("george-showroom playbook <playbook_id>")));
   assert.ok(output.help.some((item) => item.includes("combines several playbooks")));
   assert.ok(output.help.some((item) => item.includes("MUST open each matching playbook")));
