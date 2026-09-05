@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +21,7 @@ import {
   isAllowedHostHeader,
   isAllowedRequestHost,
   resolveArtifactAsset,
+  parseArtifactHeadBounded,
   resolveDesignAssetPath,
   resolveIdleTimeoutMs,
   resolveWatchTarget,
@@ -113,6 +114,40 @@ async function startPresenceStream(base, key) {
   };
 }
 
+async function startQueueStateStream(base, key) {
+  const controller = new AbortController();
+  const res = await fetch(`${base}/events/${key}`, { signal: controller.signal });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  return {
+    async next() {
+      const deadline = Date.now() + 500;
+      while (true) {
+        const match = buffer.match(/^event: queue-state\ndata: (.+)\n\n/m);
+        if (match) {
+          buffer = buffer.replace(match[0], "");
+          return JSON.parse(match[1]).count;
+        }
+        const remaining = Math.max(1, deadline - Date.now());
+        const { value, done } = await Promise.race([
+          reader.read(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("timed out waiting for queue state event")), remaining),
+          ),
+        ]);
+        if (done) throw new Error("queue state stream closed before a queue state event");
+        buffer += decoder.decode(value, { stream: true });
+      }
+    },
+    async close() {
+      controller.abort();
+      await reader.cancel().catch(() => {});
+    },
+  };
+}
+
 test("server delegates artifact SDK generation to a dedicated source module", async () => {
   const source = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 
@@ -170,6 +205,32 @@ test("artifact SDK script is valid JavaScript", () => {
   const js = createSdkJs("abc");
 
   assert.doesNotThrow(() => new Function(js));
+});
+
+test("artifact SDK exposes the authoritative host queue count without prompt contents", () => {
+  const js = createSdkJs("abc");
+
+  assert.match(js, /getQueueState:\s*\(\) => \(\{\s*\.\.\.queueState\s*\}\)/);
+  assert.match(js, /msg\.type === "lavish:queueState"/);
+  assert.match(js, /new CustomEvent\("lavish:queueState"/);
+  assert.doesNotMatch(js, /queuedPrompts = msg\.prompts/);
+});
+
+test("artifact SDK accepts host control messages only from its parent frame", () => {
+  const js = createSdkJs("abc");
+
+  const listener = js.lastIndexOf('window.addEventListener("message"');
+  const sourceCheck = js.indexOf("event.source !== parent", listener);
+  const queueState = js.indexOf('msg.type === "lavish:queueState"', listener);
+  assert.ok(listener >= 0 && sourceCheck > listener && sourceCheck < queueState);
+});
+
+test("artifact SDK correlates snapshot replies and exposes atomic Send & End", async () => {
+  const sdk = await readFile(new URL("../src/artifact-sdk.js", import.meta.url), "utf8");
+
+  assert.match(sdk, /requestId: String\(msg\.requestId \|\| ""\)/);
+  assert.match(sdk, /function sendAndEnd\(\)/);
+  assert.match(sdk, /postArtifactMessage\("lavish:sendAndEnd"\)/);
 });
 
 test("artifact SDK ignores George Showroom-owned annotation UI", () => {
@@ -296,6 +357,90 @@ test("the annotate switch exposes the mode toggle hotkey as a discoverable toolt
 
   assert.match(html, /"modeToggleHotkeyKey":"i"/);
   assert.match(html, /id="annotation"[^>]*title="Toggle annotate\/explore mode \(⌘I \/ Ctrl\+I\)"/);
+});
+
+test("artifact review metadata opts a session into video transport and explore mode", () => {
+  const metadata = extractArtifactHead(`<!doctype html><html><head>
+    <meta name="lavish-annotation-mode" content="off">
+    <meta name="lavish-media-transport" content="video">
+    <title>Video review</title>
+  </head><body></body></html>`);
+
+  assert.equal(metadata.annotationMode, false);
+  assert.equal(metadata.mediaTransportEnabled, true);
+
+  const html = createChromeHtml(
+    { key: "abc", file: "/tmp/review.html" },
+    {
+      initialAnnotationMode: metadata.annotationMode,
+      mediaTransportEnabled: metadata.mediaTransportEnabled,
+    },
+  );
+  const session = chromeSessionData(html);
+  assert.equal(session.initialAnnotationMode, false);
+  assert.equal(session.mediaTransportEnabled, true);
+  assert.match(html, /id="annotation"[^>]*aria-pressed="false"/);
+});
+
+test("ordinary artifacts keep annotation enabled and native page keyboard behavior", () => {
+  const metadata = extractArtifactHead("<!doctype html><html><head><title>Plan</title></head><body></body></html>");
+
+  assert.equal(metadata.annotationMode, true);
+  assert.equal(metadata.mediaTransportEnabled, false);
+});
+
+test("artifact review metadata ignores comments and normalizes active values", () => {
+  const metadata = extractArtifactHead(`<!doctype html><html><head>
+    <!-- <meta name="lavish-media-transport" content="video"> -->
+    <meta name=" lavish-annotation-mode " content=" OFF ">
+    <meta name=" lavish-media-transport " content=" VIDEO ">
+  </head><body></body></html>`);
+
+  assert.equal(metadata.annotationMode, false);
+  assert.equal(metadata.mediaTransportEnabled, true);
+});
+
+test("artifact review metadata is parsed beyond the first 10 KB of the head", () => {
+  const padding = "x".repeat(12_000);
+  const metadata = extractArtifactHead(`<!doctype html><html><head>
+    <title>${padding}</title>
+    <meta name="lavish-annotation-mode" content="off">
+    <meta name="lavish-media-transport" content="video">
+  </head><body></body></html>`);
+
+  assert.equal(metadata.annotationMode, false);
+  assert.equal(metadata.mediaTransportEnabled, true);
+});
+
+test("commented video metadata does not capture ordinary artifact keyboard behavior", () => {
+  const metadata = extractArtifactHead(`<!doctype html><html><head>
+    <!-- <meta name="lavish-annotation-mode" content="off"> -->
+    <!-- <meta name="lavish-media-transport" content="video"> -->
+  </head><body></body></html>`);
+
+  assert.equal(metadata.annotationMode, true);
+  assert.equal(metadata.mediaTransportEnabled, false);
+});
+
+test("artifact head parsing stops before a large ordinary-artifact body", () => {
+  const artifact = `<!doctype html><html><head>
+    <meta name="lavish-media-transport" content="video">
+  </head><body>${"<div>body</div>".repeat(700_000)}</body></html>`;
+
+  const parsed = parseArtifactHeadBounded(artifact);
+
+  assert.equal(parsed.complete, true);
+  assert.equal(parsed.limited, false);
+  assert.ok(parsed.consumedChars < 16_384, `parsed ${parsed.consumedChars} characters`);
+});
+
+test("artifact SDK includes declarative video transport handling", () => {
+  const js = createSdkJs("abc");
+
+  assert.match(js, /lavish-media-transport/);
+  assert.match(js, /mediaTransportActionForEvent/);
+  assert.match(js, /lavish:mediaTransport/);
+  assert.match(js, /handleMediaTransport/);
 });
 
 test("artifact SDK lets marked feedback controls handle their own clicks", () => {
@@ -560,8 +705,9 @@ test("copy DOM snapshot requests a fresh snapshot and copies it to the clipboard
 
   assert.match(js, /const snapshotRequests = \[\]/);
   assert.match(js, /requestSnapshot\("copy"\)/);
-  assert.match(js, /const snapshotAction = snapshotRequests\.shift\(\) \|\| "submit"/);
-  assert.match(js, /if \(snapshotAction === "copy"\)/);
+  assert.match(js, /postToFrame\(\{ type: "lavish:requestSnapshot", requestId \}\)/);
+  assert.match(js, /const \[snapshotRequest\] = snapshotRequests\.splice\(snapshotIndex, 1\)/);
+  assert.match(js, /if \(snapshotRequest\.action === "copy"\)/);
   assert.match(js, /copyText\(msg\.snapshot \|\| ""\)/);
 });
 
@@ -623,6 +769,12 @@ test("chrome bootstraps persisted chat history so missed replies still appear", 
   assert.match(html, /Persisted reply/);
 });
 
+test("chrome bootstraps the authoritative server-side prompt count", () => {
+  const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html", pending_prompts: 6 });
+
+  assert.equal(chromeSessionData(html).initialPendingPrompts, 6);
+});
+
 test("chrome client renders persisted chat history", async () => {
   const js = await chromeClientSource();
 
@@ -644,13 +796,14 @@ test("chrome shows agent working state when a previous poll has released", async
   assert.match(js, /spinner/);
 });
 
-test("chrome disables sending only while working or ended", async () => {
+test("chrome keeps durable sending available for every presence state until ended", async () => {
   const js = await chromeClientSource();
 
   assert.match(js, /let agentPresence = "waiting"/);
   assert.match(js, /function updateSendState\(\)/);
-  assert.match(js, /sendButton\.disabled = ended \|\| agentPresence === "working"/);
+  assert.match(js, /sendButton\.disabled = ended/);
   assert.match(js, /sendAndEndButton\.disabled = sendButton\.disabled/);
+  assert.doesNotMatch(js, /if \(ended \|\| agentPresence === "working"\) return/);
   assert.doesNotMatch(js, /hasContent/);
 });
 
@@ -671,10 +824,15 @@ test("composer offers two always-visible top-level send actions", async () => {
   const css = await chromeCssSource();
 
   assert.match(html, /class="button" id="send">Send to Agent</);
+  assert.match(html, /id="sendStatus" role="status" aria-live="polite"/);
+  assert.match(
+    html,
+    /Copy exports prompts, metadata, timecodes, and the page snapshot; it may contain private review context\./,
+  );
   assert.match(html, /class="button button-danger" id="sendAndEnd"[^<]*>.*Send &amp; End</);
   assert.match(
     html,
-    /<div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first\.<\/div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">.*<button class="button" id="send">Send to Agent<\/button><\/div>/,
+    /<div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first\.<\/div><div class="send-status" id="sendStatus" role="status" aria-live="polite" hidden><\/div><div class="submission-recovery" id="submissionRecovery" hidden>.*Copy retained feedback.*Unlock for requeue.*<div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">.*<button class="button" id="send">Send to Agent<\/button><\/div>/,
   );
   assert.doesNotMatch(html, /id="sendCaret"/);
   assert.doesNotMatch(html, /id="sendMenu"/);
@@ -688,7 +846,7 @@ test("send and end submits queued prompts before ending the session", async () =
 
   assert.match(js, /let endAfterSubmit = false/);
   assert.match(js, /sendQueued\(true\)/);
-  assert.match(js, /if \(shouldEndSession\) body\.endSession = true/);
+  assert.match(js, /const body = submissionPayload\(batch\)/);
   assert.match(js, /if \(shouldEndSession\) \{\n {4}endAfterSubmit = false;\n {4}markSessionEnded\(\)/);
   assert.match(js, /if \(!succeeded\) \{\n {6}endAfterSubmit = false/);
   assert.doesNotMatch(js, /await endSession\(\)/);
@@ -708,7 +866,7 @@ test("chrome shows a waiting banner when no agent has attached", async () => {
   const css = await chromeCssSource();
 
   assert.match(html, /id="presenceBanner"/);
-  assert.match(html, /Your agent is not listening/);
+  assert.match(html, /Your agent is not listening\. Feedback is saved for the next poll of this artifact\./);
   assert.match(js, /presenceBanner\.hidden = ended \|\| agentPresence !== "waiting"/);
   assert.match(css, /\.presence-banner\{/);
 });
@@ -906,9 +1064,9 @@ test("chrome keeps queued prompts persisted until submit succeeds", async () => 
 
   assert.doesNotMatch(js, /const prompts = queued\.splice\(0, queued\.length\)/);
   assert.match(js, /await fetch\("\/api\/" \+ key \+ "\/prompts", \{/);
-  assert.doesNotMatch(js, /queued\.splice\(0, prompts\.length\)/);
-  assert.match(js, /for \(const prompt of prompts\) \{/);
-  assert.match(js, /const index = queued\.indexOf\(prompt\)/);
+  assert.match(js, /persistPendingSubmission\(\)/);
+  assert.match(js, /for \(const prompt of batch\.prompts\) \{/);
+  assert.match(js, /candidate\?\.\[internalQueueItemIdField\] === itemId/);
   assert.match(js, /if \(index !== -1\) queued\.splice\(index, 1\)/);
 });
 
@@ -927,8 +1085,8 @@ test("chrome submits prompts queued during an in-flight submit", async () => {
   assert.match(js, /let submitQueuedAgain = false/);
   assert.match(js, /submitQueuedAgain = true/);
   assert.match(js, /const shouldSubmitAgain = submitQueuedAgain/);
-  assert.match(js, /else if \(!ended && shouldSubmitAgain\) \{\n {6}if \(queued\.length\) \{\n {8}submitQueued\(\)/);
-  assert.match(js, /else if \(endAfterSubmit\) \{\n {8}endAfterSubmit = false;\n {8}endSession\(\)/);
+  assert.match(js, /else if \(!ended && shouldSubmitAgain && \(queued\.length \|\| endAfterSubmit\)\) \{/);
+  assert.doesNotMatch(js, /else if \(endAfterSubmit\) \{\n {8}endAfterSubmit = false;\n {8}endSession\(\)/);
 });
 
 test("/health reports the server version so clients can detect upgrades", async () => {
@@ -1340,6 +1498,71 @@ test("/artifact serves files copied under the artifact directory", async () => {
     assert.equal(svg.status, 200);
     assert.match(svg.headers.get("content-type") || "", /image\/svg\+xml/);
     assert.match(await svg.text(), /<svg/);
+  } finally {
+    await server.close();
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("/artifact serves review media with HTTP byte ranges for native seeking", async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const dir = path.join(parent, "review");
+  const mediaDir = path.join(dir, "media");
+  const artifact = path.join(dir, "index.html");
+  const bytes = Buffer.from(Array.from({ length: 4096 }, (_, index) => index % 251));
+  await mkdir(dir);
+  await mkdir(mediaDir);
+  await writeFile(artifact, '<!doctype html><html><body><video src="media/proxy.mp4"></video></body></html>');
+  await writeFile(path.join(mediaDir, "proxy.mp4"), bytes);
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const sessionRes = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const session = await sessionRes.json();
+    const response = await fetch(`${base}/artifact/${session.key}/media/proxy.mp4`, {
+      headers: { range: "bytes=100-199" },
+    });
+
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get("accept-ranges"), "bytes");
+    assert.equal(response.headers.get("content-range"), "bytes 100-199/4096");
+    assert.equal(response.headers.get("content-length"), "100");
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes.subarray(100, 200));
+  } finally {
+    await server.close();
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("/artifact rejects symlink and encoded traversal outside the artifact directory", async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const dir = path.join(parent, "review");
+  const outside = path.join(parent, "private.txt");
+  const artifact = path.join(dir, "index.html");
+  await mkdir(dir);
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  await writeFile(outside, "private bytes");
+  await symlink(outside, path.join(dir, "linked.txt"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const session = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((res) => res.json());
+
+    const linked = await fetch(`${base}/artifact/${session.key}/linked.txt`);
+    assert.equal(linked.status, 403);
+    assert.doesNotMatch(await linked.text(), /private bytes/);
+
+    const encoded = await fetch(`${base}/artifact/${session.key}/%2e%2e%2fprivate.txt`);
+    assert.ok(encoded.status === 403 || encoded.status === 404);
+    assert.doesNotMatch(await encoded.text(), /private bytes/);
   } finally {
     await server.close();
     await rm(parent, { recursive: true, force: true });
@@ -2942,6 +3165,421 @@ test("send-and-end prompt submissions wake active polls with ended attribution",
       await presence.close();
     }
   } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("send-and-end durably stores every prompt before a later first poll", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const keepAlive = path.join(dir, "keep-alive.html");
+  const stateFile = path.join(dir, "state.json");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  await writeFile(keepAlive, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: keepAlive }),
+    });
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+    const prompts = [
+      { prompt: "00:04.1 first note", tag: "feedback" },
+      { prompt: "00:29.7 second note", tag: "feedback" },
+      { prompt: "Restore the missing context", tag: "message" },
+    ];
+
+    const submitted = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ endSession: true, prompts }),
+    });
+    assert.equal(submitted.status, 200);
+
+    const stored = JSON.parse(await readFile(stateFile, "utf8")).sessions[key];
+    assert.equal(stored.status, "ended");
+    assert.equal(stored.ended_by, "user");
+    assert.equal(stored.pending_prompts, prompts.length);
+    assert.deepEqual(
+      stored.prompts.map(({ prompt, tag }) => ({ prompt, tag })),
+      prompts,
+    );
+
+    const recovered = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then((res) =>
+      res.json(),
+    );
+    assert.equal(recovered.status, "feedback");
+    assert.equal(recovered.session_ended, true);
+    assert.equal(recovered.ended_by, "user");
+    assert.deepEqual(
+      recovered.prompts.map(({ prompt, tag }) => ({ prompt, tag })),
+      prompts,
+    );
+
+    const exactlyOnce = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then((res) =>
+      res.json(),
+    );
+    assert.deepEqual(exactlyOnce, { status: "ended", ended_by: "user" });
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("prompt API acknowledges one idempotent six-note plus message batch without timestamp loss", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body><video></video></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key, review_incarnation: reviewIncarnation } = await open.json();
+    const exactTimes = [0.1256789, 12.3456789, 24.6789012, 36.9012345, 48.2345678, 59.9999999];
+    /** @type {any[]} */
+    const prompts = exactTimes.map((currentTime) => ({
+      prompt: `Timecoded note ${currentTime}`,
+      tag: "feedback",
+      target: { type: "video-timecode", currentTime },
+    }));
+    prompts.push({ prompt: "General pacing note", tag: "message" });
+    const body = {
+      batchId: "api-six-plus-one",
+      reviewIncarnation,
+      domSnapshot: "uid=1 video",
+      prompts,
+    };
+
+    const submitted = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((response) => response.json());
+    assert.deepEqual(
+      {
+        batch_id: submitted.batch_id,
+        duplicate: submitted.duplicate,
+        submitted_prompts: submitted.submitted_prompts,
+        processed_prompts: submitted.processed_prompts,
+        submitted_timestamped_notes: submitted.submitted_timestamped_notes,
+        submitted_messages: submitted.submitted_messages,
+        submitted_layout_warnings: submitted.submitted_layout_warnings,
+        accepted_prompts: submitted.accepted_prompts,
+        timestamped_notes: submitted.timestamped_notes,
+        messages: submitted.messages,
+        deduplicated_layout_warnings: submitted.deduplicated_layout_warnings,
+      },
+      {
+        batch_id: "api-six-plus-one",
+        duplicate: false,
+        submitted_prompts: 7,
+        processed_prompts: 7,
+        submitted_timestamped_notes: 6,
+        submitted_messages: 1,
+        submitted_layout_warnings: 0,
+        accepted_prompts: 7,
+        timestamped_notes: 6,
+        messages: 1,
+        deduplicated_layout_warnings: 0,
+      },
+    );
+
+    const delivered = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then(
+      (response) => response.json(),
+    );
+    assert.deepEqual(
+      delivered.prompts.slice(0, 6).map((prompt) => prompt.target.currentTime),
+      exactTimes,
+    );
+
+    const retried = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((response) => response.json());
+    assert.equal(retried.duplicate, true);
+    assert.equal(retried.accepted_prompts, 7);
+    const afterRetry = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then(
+      (response) => response.json(),
+    );
+    assert.equal(afterRetry.status, "waiting");
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("prompt API rejects a reused batch identity with different equal-count content", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+    const first = await fetch(`${base}/api/${opened.key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        batchId: "server-payload-bound",
+        reviewIncarnation: opened.review_incarnation,
+        prompts: [{ prompt: "First", tag: "feedback" }],
+      }),
+    });
+    assert.equal(first.status, 200);
+
+    const collision = await fetch(`${base}/api/${opened.key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        batchId: "server-payload-bound",
+        reviewIncarnation: opened.review_incarnation,
+        prompts: [{ prompt: "Second", tag: "feedback" }],
+      }),
+    });
+    assert.equal(collision.status, 409);
+    assert.equal((await collision.json()).status, "batch-id-reused");
+
+    const delivered = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then(
+      (response) => response.json(),
+    );
+    assert.deepEqual(
+      delivered.prompts.map((prompt) => prompt.prompt),
+      ["First"],
+    );
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an acknowledgement-lost Send & End batch cannot replay into a reopened review incarnation", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  const keepAlive = path.join(dir, "keep-alive.html");
+  await writeFile(artifact, "<!doctype html><html><body><video></video></body></html>");
+  await writeFile(keepAlive, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: keepAlive }),
+    });
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    }).then((response) => response.json());
+    const body = {
+      batchId: "lost-send-and-end",
+      reviewIncarnation: opened.review_incarnation,
+      endSession: true,
+      prompts: [{ prompt: "Final exact note", tag: "feedback" }],
+    };
+    const committed = await fetch(`${base}/api/${opened.key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(committed.status, 200);
+    // Model a lost browser acknowledgement: the server committed and the agent consumed it,
+    // while the browser still holds the original pending batch.
+    const firstDelivery = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then(
+      (response) => response.json(),
+    );
+    assert.deepEqual(
+      firstDelivery.prompts.map((prompt) => prompt.prompt),
+      ["Final exact note"],
+    );
+
+    const reopened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact, reopen: true }),
+    }).then((response) => response.json());
+    assert.notEqual(reopened.review_incarnation, opened.review_incarnation);
+
+    const staleRetry = await fetch(`${base}/api/${opened.key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(staleRetry.status, 409);
+    assert.equal((await staleRetry.json()).status, "stale-review-incarnation");
+    const afterRetry = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then(
+      (response) => response.json(),
+    );
+    assert.equal(afterRetry.status, "waiting");
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a poll for the wrong artifact cannot consume or block a later send-and-end", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "review.html");
+  const wrongArtifact = path.join(dir, "example.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  await writeFile(wrongArtifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const openReview = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await openReview.json();
+    await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: wrongArtifact }),
+    });
+    const wrongPoll = fetch(`${base}/api/poll?file=${encodeURIComponent(wrongArtifact)}&timeoutMs=300`).then((res) =>
+      res.json(),
+    );
+    const prompts = [
+      { prompt: "Timecoded one", tag: "feedback" },
+      { prompt: "Freeform two", tag: "message" },
+    ];
+
+    const submitted = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ endSession: true, prompts }),
+    });
+    assert.equal(submitted.status, 200);
+
+    const recovered = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then((res) =>
+      res.json(),
+    );
+    assert.deepEqual(
+      recovered.prompts.map(({ prompt, tag }) => ({ prompt, tag })),
+      prompts,
+    );
+    assert.equal(recovered.session_ended, true);
+    assert.deepEqual(await wrongPoll, { status: "waiting" });
+
+    const exactlyOnce = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then((res) =>
+      res.json(),
+    );
+    assert.deepEqual(exactlyOnce, { status: "ended", ended_by: "user" });
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("queue-state events track the authoritative server queue across submit and poll", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "review.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  let stream;
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+    stream = await startQueueStateStream(base, key);
+    assert.equal(await stream.next(), 0);
+
+    await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompts: [{ prompt: "One" }, { prompt: "Two" }] }),
+    });
+    assert.equal(await stream.next(), 2);
+
+    const recovered = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then((res) =>
+      res.json(),
+    );
+    assert.equal(recovered.prompts.length, 2);
+    assert.equal(await stream.next(), 0);
+  } finally {
+    await stream?.close();
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("layout-warning submit cannot emit a stale positive queue count after a concurrent poll drains it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "review.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  let stream;
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+    const load = await beginArtifactLoad(base, key);
+    await fetch(artifactLoadUrl(base, key, load));
+    const recorded = await fetch(`${base}/api/${key}/layout-diagnostics`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...artifactMutation(load, { artifact_pass_sequence: 1 }),
+        complete: true,
+        viewport_width: 1440,
+        findings: [{ selector: "button", kind: "clipped-control", overflowPx: 20, severity: "error" }],
+      }),
+    }).then((res) => res.json());
+    const prepared = await fetch(`${base}/api/${key}/layout-warnings/queue`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ids: [recorded.warnings[0].id] }),
+    }).then((res) => res.json());
+
+    stream = await startQueueStateStream(base, key);
+    assert.equal(await stream.next(), 0);
+    const submit = fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompts: [{ ...prepared.prompt, uid: "", selector: "", tag: "layout-warnings" }],
+      }),
+    });
+
+    let recovered;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      recovered = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`).then((res) =>
+        res.json(),
+      );
+      if (recovered.status === "feedback") break;
+    }
+    assert.equal(recovered.status, "feedback");
+    assert.equal((await submit).status, 200);
+    assert.equal(await stream.next(), 1);
+    assert.equal(await stream.next(), 0);
+  } finally {
+    await stream?.close();
     await server.close();
     await rm(dir, { recursive: true, force: true });
   }

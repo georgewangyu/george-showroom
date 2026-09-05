@@ -139,7 +139,7 @@ decisionForm?.addEventListener("submit", (event) => {
 
 for (const button of document.querySelectorAll("[data-end-review]")) {
   button.addEventListener("click", () => {
-    if (window.lavish?.endSession) window.lavish.endSession();
+    if (window.lavish?.sendAndEnd) window.lavish.sendAndEnd();
     else button.textContent = "Open in Showroom to end";
   });
 }

@@ -5,9 +5,39 @@ import vm from "node:vm";
 
 const sourceUrl = new URL("../src/chrome-client.js", import.meta.url);
 
-/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number }} HarnessSessionData */
+/** @typedef {{ key: string, file: string, reviewIncarnation?: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialAnnotationMode?: boolean, mediaTransportEnabled?: boolean, initialLayoutWarnings?: any[], initialPendingPrompts?: number, chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number }} HarnessSessionData */
 /** @type {HarnessSessionData} */
-const defaultSessionData = { key: "abc", file: "/tmp/artifact.html", modeToggleHotkeyKey: "i" };
+const defaultSessionData = {
+  key: "abc",
+  file: "/tmp/artifact.html",
+  modeToggleHotkeyKey: "i",
+  reviewIncarnation: "review-incarnation-one",
+};
+
+function acknowledgedPromptResponse(init, overrides = {}) {
+  const body = JSON.parse(init.body);
+  return {
+    ok: true,
+    json: async () => ({
+      status: "queued",
+      batch_id: body.batchId,
+      review_incarnation: body.reviewIncarnation,
+      duplicate: false,
+      submitted_prompts: body.prompts.length,
+      processed_prompts: body.prompts.length,
+      submitted_timestamped_notes: body.prompts.filter((prompt) => prompt.target?.type === "video-timecode").length,
+      submitted_messages: body.prompts.filter((prompt) => prompt.tag === "message").length,
+      submitted_layout_warnings: body.prompts.filter(
+        (prompt) => prompt.tag === "layout-warnings" && prompt.target?.type === "layout-warnings",
+      ).length,
+      accepted_prompts: body.prompts.length,
+      timestamped_notes: body.prompts.filter((prompt) => prompt.target?.type === "video-timecode").length,
+      messages: body.prompts.filter((prompt) => prompt.tag === "message").length,
+      deduplicated_layout_warnings: 0,
+      ...overrides,
+    }),
+  };
+}
 
 async function createChromeHarness({
   fetchImpl = /** @type {(url?: any, init?: any) => Promise<any>} */ (
@@ -32,6 +62,7 @@ async function createChromeHarness({
   const beginRequests = [];
   const artifactBeginRequests = [];
   const focusLog = [];
+  const clipboardWrites = [];
   let nextTimerId = 1;
   let reloadCount = 0;
   let artifactRevision = 0;
@@ -241,7 +272,13 @@ async function createChromeHarness({
         reloadCount += 1;
       },
     },
-    navigator: {},
+    navigator: {
+      clipboard: {
+        async writeText(value) {
+          clipboardWrites.push(String(value));
+        },
+      },
+    },
     setTimeout: fakeSetTimeout,
     URL: {
       createObjectURL() {
@@ -372,6 +409,7 @@ async function createChromeHarness({
       return reloadCount;
     },
     focusLog,
+    clipboardWrites,
     storage,
     warningRows() {
       return element("warningsList").children.filter((child) => String(child.className).startsWith("warning-row"));
@@ -792,6 +830,7 @@ test("a stale queued layout prompt remains available for user re-decision", asyn
   row.children[0].checked = true;
   row.children[0].dispatch("change");
   await chrome.element("warningsQueueButton").onclick();
+  chrome.element("send").onclick();
   chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "" });
   await flushPromises();
 
@@ -1576,7 +1615,7 @@ test("chrome client strips the internal queue key before posting prompts", async
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init) => {
       posts.push({ url, body: JSON.parse(init.body) });
-      return { ok: true };
+      return acknowledgedPromptResponse(init);
     },
   });
 
@@ -1592,11 +1631,686 @@ test("chrome client strips the internal queue key before posting prompts", async
 
   assert.equal(posts.length, 1);
   assert.equal(posts[0].url, "/api/abc/prompts");
+  assert.match(posts[0].body.batchId, /^[A-Za-z0-9_-]+$/);
+  delete posts[0].body.batchId;
   assert.deepEqual(posts[0].body, {
     prompts: [{ prompt: "Use plan B", selector: "input#plan-b", tag: "choice", text: "Plan B" }],
     domSnapshot: "uid=1 body",
+    reviewIncarnation: "review-incarnation-one",
+    endSession: false,
   });
   assert.equal(chrome.queued().length, 0);
+});
+
+test("chrome atomically sends six exact-time notes plus one message with explicit acknowledgement", async () => {
+  const posts = [];
+  /** @type {((value: any) => void) | undefined} */
+  let acknowledge;
+  const response = new Promise((resolve) => {
+    acknowledge = resolve;
+  });
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return response;
+    },
+  });
+
+  const exactTimes = [0.1256789, 12.3456789, 24.6789012, 36.9012345, 48.2345678, 59.9999999];
+  for (const currentTime of exactTimes) {
+    chrome.sendFrameMessage({
+      type: "lavish:queuePrompt",
+      prompt: {
+        prompt: `Timecoded note at ${currentTime}`,
+        selector: "form#commentForm",
+        tag: "feedback",
+        text: `Note ${currentTime}`,
+        target: { type: "video-timecode", currentTime },
+      },
+    });
+  }
+  chrome.element("chatInput").value = "General pacing note";
+  chrome.element("send").onclick();
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 video" });
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.prompts.length, 7);
+  assert.deepEqual(
+    posts[0].body.prompts.slice(0, 6).map((prompt) => prompt.target.currentTime),
+    exactTimes,
+  );
+  assert.match(posts[0].body.batchId, /^[A-Za-z0-9_-]+$/);
+  assert.equal(chrome.queued().length, 7, "the complete local batch remains until acknowledgement");
+  assert.equal(chrome.element("sendStatus").dataset.state, "submitting");
+  assert.match(chrome.element("sendStatus").textContent, /Sending 6 timestamped notes \+ 1 message/);
+
+  assert.ok(acknowledge);
+  acknowledge({
+    ok: true,
+    json: async () => ({
+      status: "queued",
+      batch_id: posts[0].body.batchId,
+      review_incarnation: posts[0].body.reviewIncarnation,
+      duplicate: false,
+      submitted_prompts: 7,
+      processed_prompts: 7,
+      submitted_timestamped_notes: 6,
+      submitted_messages: 1,
+      submitted_layout_warnings: 0,
+      accepted_prompts: 7,
+      timestamped_notes: 6,
+      messages: 1,
+      deduplicated_layout_warnings: 0,
+    }),
+  });
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(chrome.queued().length, 0);
+  assert.equal(chrome.element("sendStatus").dataset.state, "success");
+  assert.equal(chrome.element("sendStatus").textContent, "Sent 6 timestamped notes + 1 message.");
+});
+
+test("chrome freezes prompt and composer identities when Send is clicked before the snapshot returns", async () => {
+  const posts = [];
+  const storage = new Map();
+  const chrome = await createChromeHarness({
+    storage,
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      posts.push({ url, body });
+      return {
+        ok: true,
+        json: async () => ({
+          status: "queued",
+          batch_id: body.batchId,
+          review_incarnation: body.reviewIncarnation,
+          duplicate: false,
+          submitted_prompts: body.prompts.length,
+          processed_prompts: body.prompts.length,
+          submitted_timestamped_notes: body.prompts.filter((prompt) => prompt.target?.type === "video-timecode").length,
+          submitted_messages: body.prompts.filter((prompt) => prompt.tag === "message").length,
+          submitted_layout_warnings: body.prompts.filter(
+            (prompt) => prompt.tag === "layout-warnings" && prompt.target?.type === "layout-warnings",
+          ).length,
+          accepted_prompts: body.prompts.length,
+          timestamped_notes: body.prompts.filter((prompt) => prompt.target?.type === "video-timecode").length,
+          messages: body.prompts.filter((prompt) => prompt.tag === "message").length,
+          deduplicated_layout_warnings: 0,
+        }),
+      };
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: {
+      prompt: "First exact note",
+      tag: "feedback",
+      target: { type: "video-timecode", currentTime: 12.3456789 },
+    },
+  });
+  chrome.element("chatInput").value = "Frozen composer message";
+
+  chrome.element("send").onclick();
+  const frozen = JSON.parse(storage.get("lavish-axi:pending-batch:abc"));
+  assert.equal(frozen.prompts.length, 2, "the batch is durable before the asynchronous snapshot arrives");
+  assert.equal(frozen.prompts[1].prompt, "Frozen composer message");
+
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: {
+      prompt: "Queued after Send",
+      tag: "feedback",
+      target: { type: "video-timecode", currentTime: 19.8765432 },
+    },
+  });
+  chrome.element("chatInput").value = "Typed after Send";
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 video" });
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["First exact note", "Frozen composer message"],
+  );
+  assert.equal(chrome.queued().length, 1);
+  assert.equal(chrome.queued()[0].prompt, "Queued after Send");
+  assert.equal(chrome.element("chatInput").value, "Typed after Send");
+});
+
+test("chrome submits a frozen batch when the artifact snapshot deadline expires", async () => {
+  const posts = [];
+  const storage = new Map();
+  const chrome = await createChromeHarness({
+    storage,
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return acknowledgedPromptResponse(init);
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Persist despite a silent frame", tag: "feedback", selector: "main" },
+  });
+
+  chrome.element("send").onclick();
+  const request = chrome.postedToFrame.at(-1);
+  assert.equal(request.type, "lavish:requestSnapshot");
+  assert.match(request.requestId, /^snapshot-/);
+  assert.ok(storage.has("lavish-axi:pending-batch:abc"));
+  assert.equal(posts.length, 0);
+
+  chrome.runTimers(2_000);
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.domSnapshot, "");
+  assert.equal(chrome.queued().length, 0);
+  assert.equal(storage.has("lavish-axi:pending-batch:abc"), false);
+
+  chrome.sendFrameMessage({
+    type: "lavish:snapshot",
+    requestId: request.requestId,
+    snapshot: "late stale snapshot",
+  });
+  await flushPromises();
+  assert.equal(posts.length, 1, "a late response cannot resubmit the settled batch");
+});
+
+test("Send & End before a snapshot preserves newer composer text in a second batch", async () => {
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return acknowledgedPromptResponse(init);
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Frozen first note", tag: "feedback", selector: "main" },
+  });
+  chrome.element("send").onclick();
+  const request = chrome.postedToFrame.at(-1);
+
+  chrome.element("chatInput").value = "New message before the snapshot returns";
+  chrome.element("sendAndEnd").onclick();
+  chrome.sendFrameMessage({
+    type: "lavish:snapshot",
+    requestId: request.requestId,
+    snapshot: "uid=1 main",
+  });
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 2);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Frozen first note"],
+  );
+  assert.equal(posts[0].body.endSession, false);
+  assert.deepEqual(
+    posts[1].body.prompts.map((prompt) => prompt.prompt),
+    ["New message before the snapshot returns"],
+  );
+  assert.equal(posts[1].body.endSession, true);
+  assert.equal(chrome.element("chatInput").disabled, true);
+});
+
+test("chrome retains the complete batch when a 2xx response lacks a valid exact receipt", async () => {
+  for (const json of [async () => ({}), async () => Promise.reject(new SyntaxError("empty JSON"))]) {
+    const storage = new Map();
+    const chrome = await createChromeHarness({
+      storage,
+      fetchImpl: async () => ({ ok: true, json }),
+    });
+    chrome.sendFrameMessage({
+      type: "lavish:queuePrompt",
+      prompt: {
+        prompt: "Never clear without a receipt",
+        tag: "feedback",
+        target: { type: "video-timecode", currentTime: 7.654321 },
+      },
+    });
+
+    chrome.element("send").onclick();
+    chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 video" });
+    await flushPromises();
+    await flushPromises();
+
+    assert.equal(chrome.queued().length, 1);
+    assert.equal(chrome.element("sendStatus").dataset.state, "error");
+    assert.match(chrome.element("sendStatus").textContent, /not acknowledged/i);
+    assert.ok(storage.has("lavish-axi:pending-batch:abc"));
+  }
+});
+
+test("chrome rejects terminal receipts that under-deliver timecodes, messages, or ordinary annotations", async () => {
+  const cases = [
+    {
+      prompt: {
+        prompt: "Exact-time note",
+        tag: "feedback",
+        target: { type: "video-timecode", currentTime: 12.3456789 },
+      },
+      composer: "Freeform message",
+      receipt: {
+        submitted_prompts: 2,
+        processed_prompts: 2,
+        submitted_timestamped_notes: 1,
+        submitted_messages: 1,
+        submitted_layout_warnings: 0,
+        accepted_prompts: 0,
+        timestamped_notes: 0,
+        messages: 0,
+        deduplicated_layout_warnings: 0,
+      },
+    },
+    {
+      prompt: { prompt: "Ordinary annotation", tag: "feedback", selector: "h1" },
+      composer: "",
+      receipt: {
+        submitted_prompts: 1,
+        processed_prompts: 1,
+        submitted_timestamped_notes: 0,
+        submitted_messages: 0,
+        submitted_layout_warnings: 0,
+        accepted_prompts: 0,
+        timestamped_notes: 0,
+        messages: 0,
+        deduplicated_layout_warnings: 1,
+      },
+    },
+  ];
+
+  for (const scenario of cases) {
+    const storage = new Map();
+    const chrome = await createChromeHarness({
+      storage,
+      fetchImpl: async (url, init) => {
+        const body = JSON.parse(init.body);
+        return acknowledgedPromptResponse(init, { batch_id: body.batchId, ...scenario.receipt });
+      },
+    });
+    chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: scenario.prompt });
+    chrome.element("chatInput").value = scenario.composer;
+    chrome.element("send").onclick();
+    chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 body" });
+    await flushPromises();
+    await flushPromises();
+
+    assert.equal(chrome.element("sendStatus").dataset.state, "error");
+    assert.ok(chrome.queued().length >= 1);
+    assert.ok(storage.has("lavish-axi:pending-batch:abc"));
+  }
+});
+
+test("chrome retains a collided batch and rotates its identity for a safe retry", async () => {
+  const posts = [];
+  const storage = new Map();
+  const chrome = await createChromeHarness({
+    storage,
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      posts.push(body);
+      if (posts.length === 1) {
+        return { ok: false, status: 409, json: async () => ({ status: "batch-id-reused" }) };
+      }
+      return acknowledgedPromptResponse(init);
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Preserve this annotation", tag: "feedback", selector: "video" },
+  });
+  chrome.element("send").onclick();
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 video" });
+  await flushPromises();
+  await flushPromises();
+
+  const retained = JSON.parse(storage.get("lavish-axi:pending-batch:abc"));
+  assert.equal(chrome.element("sendStatus").dataset.state, "error");
+  assert.equal(retained.prompts[0].prompt, "Preserve this annotation");
+  assert.notEqual(retained.id, posts[0].batchId);
+
+  chrome.element("send").onclick();
+  await flushPromises();
+  await flushPromises();
+  assert.equal(posts[1].batchId, retained.id);
+  assert.equal(chrome.queued().length, 0);
+  assert.equal(chrome.element("sendStatus").dataset.state, "success");
+});
+
+test("chrome binds a recovered pending batch to its original review incarnation and never rotates it", async () => {
+  const storage = new Map();
+  const prompt = {
+    prompt: "Final note from the prior review",
+    tag: "feedback",
+    _lavishQueueItemId: "item-prior-review",
+  };
+  storage.set("lavish-axi:queued:abc", JSON.stringify([prompt]));
+  storage.set(
+    "lavish-axi:pending-batch:abc",
+    JSON.stringify({
+      id: "batch-prior-review",
+      prompts: [prompt],
+      domSnapshot: "uid=1 video",
+      endSession: true,
+      reviewIncarnation: "review-incarnation-a",
+    }),
+  );
+  const posts = [];
+  const chrome = await createChromeHarness({
+    storage,
+    sessionData: { ...defaultSessionData, reviewIncarnation: "review-incarnation-b" },
+    fetchImpl: async (url, init) => {
+      posts.push(JSON.parse(init.body));
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({ status: "stale-review-incarnation", review_incarnation: "review-incarnation-b" }),
+      };
+    },
+  });
+
+  chrome.element("send").onclick();
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts[0].reviewIncarnation, "review-incarnation-a");
+  const retained = JSON.parse(storage.get("lavish-axi:pending-batch:abc"));
+  assert.equal(retained.id, "batch-prior-review");
+  assert.equal(retained.prompts[0].prompt, "Final note from the prior review");
+  assert.equal(chrome.element("sendStatus").dataset.state, "error");
+  assert.match(chrome.element("sendStatus").textContent, /previous review.*retained/i);
+  assert.equal(chrome.element("submissionRecovery").hidden, false);
+
+  await chrome.element("copyRetainedBatch").click();
+  assert.deepEqual(JSON.parse(chrome.clipboardWrites.at(-1)), posts[0]);
+  assert.match(chrome.element("sendStatus").textContent, /locked and unacknowledged/i);
+  assert.match(chrome.element("sendStatus").textContent, /delivery state is unknown/i);
+  assert.doesNotMatch(chrome.element("sendStatus").textContent, /unsent/i);
+
+  chrome.element("unlockRetainedBatch").click();
+  assert.equal(storage.has("lavish-axi:pending-batch:abc"), false);
+  assert.equal(chrome.queued().length, 1);
+  assert.equal(chrome.queued()[0].prompt, "Final note from the prior review");
+  assert.match(chrome.element("sendStatus").textContent, /unlocked.*may duplicate/i);
+});
+
+test("chrome explains receipt capacity and can copy the exact retained batch before reopen", async () => {
+  const storage = new Map();
+  const exactCurrentTime = 12.3456789;
+  /** @type {any} */
+  let postedBody;
+  const chrome = await createChromeHarness({
+    storage,
+    fetchImpl: async (url, init) => {
+      postedBody = JSON.parse(init.body);
+      return {
+        ok: false,
+        status: 507,
+        json: async () => ({
+          status: "receipt-capacity",
+          error: "This review reached its durable retry-receipt budget; reopen it to start a new review.",
+        }),
+      };
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: {
+      prompt: "Preserve this exact frame",
+      tag: "feedback",
+      target: { type: "video-timecode", currentTime: exactCurrentTime },
+    },
+  });
+  chrome.element("send").onclick();
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 video" });
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(chrome.element("sendStatus").dataset.state, "error");
+  assert.match(chrome.element("sendStatus").textContent, /retry-receipt budget.*retained.*reopen/i);
+  assert.equal(chrome.element("submissionRecovery").hidden, false);
+  const retainedBeforeCopy = storage.get("lavish-axi:pending-batch:abc");
+
+  await chrome.element("copyRetainedBatch").click();
+  const copied = JSON.parse(chrome.clipboardWrites.at(-1));
+  assert.deepEqual(copied, postedBody);
+  assert.equal(copied.prompts[0].target.currentTime, exactCurrentTime);
+  assert.equal(storage.get("lavish-axi:pending-batch:abc"), retainedBeforeCopy);
+  assert.equal(chrome.element("submissionRecovery").hidden, false);
+  assert.match(chrome.element("sendStatus").textContent, /locked and unacknowledged/i);
+  assert.match(chrome.element("sendStatus").textContent, /delivery state is unknown/i);
+  assert.doesNotMatch(chrome.element("sendStatus").textContent, /unsent/i);
+});
+
+test("chrome accepts a complete terminal-disposition receipt when a layout prompt was already satisfied", async () => {
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({
+          status: "queued",
+          batch_id: body.batchId,
+          review_incarnation: body.reviewIncarnation,
+          duplicate: false,
+          submitted_prompts: 2,
+          processed_prompts: 2,
+          submitted_timestamped_notes: 0,
+          submitted_messages: 1,
+          submitted_layout_warnings: 1,
+          accepted_prompts: 1,
+          timestamped_notes: 0,
+          messages: 1,
+          deduplicated_layout_warnings: 1,
+        }),
+      };
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: {
+      prompt: "Already queued layout repair",
+      tag: "layout-warnings",
+      target: { type: "layout-warnings", warnings: [{ id: "existing-warning" }] },
+    },
+  });
+  chrome.element("chatInput").value = "Keep this separate message";
+
+  chrome.element("send").onclick();
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 body" });
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(chrome.queued().length, 0);
+  assert.equal(chrome.element("sendStatus").dataset.state, "success");
+  assert.equal(chrome.element("sendStatus").textContent, "Sent 1 message.");
+});
+
+test("chrome retains and idempotently retries a whole batch after an unacknowledged error", async () => {
+  const posts = [];
+  let attempts = 0;
+  const storage = new Map();
+  const chrome = await createChromeHarness({
+    storage,
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      posts.push({ url, body });
+      attempts += 1;
+      if (attempts === 1) throw new Error("response lost");
+      return {
+        ok: true,
+        json: async () => ({
+          status: "queued",
+          batch_id: body.batchId,
+          review_incarnation: body.reviewIncarnation,
+          duplicate: true,
+          submitted_prompts: 1,
+          processed_prompts: 1,
+          submitted_timestamped_notes: 1,
+          submitted_messages: 0,
+          submitted_layout_warnings: 0,
+          accepted_prompts: 1,
+          timestamped_notes: 1,
+          messages: 0,
+          deduplicated_layout_warnings: 0,
+        }),
+      };
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: {
+      prompt: "Keep this frame",
+      selector: "video",
+      tag: "feedback",
+      text: "00:12.345",
+      target: { type: "video-timecode", currentTime: 12.345 },
+    },
+  });
+
+  chrome.element("send").onclick();
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 video" });
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(chrome.element("sendStatus").dataset.state, "error");
+  assert.match(chrome.element("sendStatus").textContent, /not acknowledged/i);
+  assert.equal(chrome.queued().length, 1);
+  assert.ok(storage.has("lavish-axi:pending-batch:abc"));
+
+  const reloadedChrome = await createChromeHarness({
+    storage,
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      posts.push({ url, body });
+      attempts += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          status: "queued",
+          batch_id: body.batchId,
+          review_incarnation: body.reviewIncarnation,
+          duplicate: true,
+          submitted_prompts: 1,
+          processed_prompts: 1,
+          submitted_timestamped_notes: 1,
+          submitted_messages: 0,
+          submitted_layout_warnings: 0,
+          accepted_prompts: 1,
+          timestamped_notes: 1,
+          messages: 0,
+          deduplicated_layout_warnings: 0,
+        }),
+      };
+    },
+  });
+  assert.equal(reloadedChrome.queued().length, 1);
+  assert.equal(reloadedChrome.element("sendStatus").dataset.state, "error");
+
+  reloadedChrome.element("send").onclick();
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].body.batchId, posts[0].body.batchId);
+  assert.deepEqual(posts[1].body.prompts, posts[0].body.prompts);
+  assert.equal(reloadedChrome.queued().length, 0);
+  assert.equal(reloadedChrome.element("sendStatus").dataset.state, "success");
+  assert.equal(storage.has("lavish-axi:pending-batch:abc"), false);
+});
+
+test("Send & End after an unacknowledged send retries unchanged then serializes the end", async () => {
+  const posts = [];
+  let attempt = 0;
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      posts.push({ url, body });
+      attempt += 1;
+      if (attempt === 1) throw new Error("response lost");
+      return acknowledgedPromptResponse(init, { duplicate: attempt === 2 });
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Keep the original payload", tag: "feedback", selector: "main" },
+  });
+  chrome.element("send").onclick();
+  const request = chrome.postedToFrame.at(-1);
+  chrome.sendFrameMessage({
+    type: "lavish:snapshot",
+    requestId: request.requestId,
+    snapshot: "uid=1 main",
+  });
+  await flushPromises();
+  await flushPromises();
+
+  chrome.element("chatInput").value = "Include this newer message before ending";
+  chrome.element("sendAndEnd").onclick();
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 3);
+  assert.equal(posts[1].body.batchId, posts[0].body.batchId);
+  assert.deepEqual(posts[1].body.prompts, posts[0].body.prompts);
+  assert.equal(posts[1].body.endSession, false);
+  assert.deepEqual(
+    posts[2].body.prompts.map((prompt) => prompt.prompt),
+    ["Include this newer message before ending"],
+  );
+  assert.equal(posts[2].body.endSession, true);
+  assert.equal(chrome.element("chatInput").disabled, true);
+});
+
+test("Send & End after reload preserves a recovered batch and serializes the end", async () => {
+  const prompt = {
+    prompt: "Recovered unacknowledged feedback",
+    tag: "feedback",
+    selector: "main",
+    _lavishQueueItemId: "item-recovered",
+  };
+  const storage = new Map([
+    ["lavish-axi:queued:abc", JSON.stringify([prompt])],
+    [
+      "lavish-axi:pending-batch:abc",
+      JSON.stringify({
+        id: "batch-recovered",
+        prompts: [prompt],
+        domSnapshot: "uid=1 main",
+        endSession: false,
+        reviewIncarnation: "review-incarnation-one",
+      }),
+    ],
+  ]);
+  const posts = [];
+  const chrome = await createChromeHarness({
+    storage,
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return acknowledgedPromptResponse(init, { duplicate: posts.length === 1 });
+    },
+  });
+
+  chrome.element("sendAndEnd").onclick();
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0].body.batchId, "batch-recovered");
+  assert.equal(posts[0].body.endSession, false);
+  assert.deepEqual(posts[1].body.prompts, []);
+  assert.equal(posts[1].body.endSession, true);
+  assert.equal(storage.has("lavish-axi:pending-batch:abc"), false);
+  assert.equal(chrome.element("chatInput").disabled, true);
 });
 
 test("chrome send and end carries the end intent with queued prompts", async () => {
@@ -1604,7 +2318,7 @@ test("chrome send and end carries the end intent with queued prompts", async () 
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init = {}) => {
       posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
-      return { ok: true };
+      return acknowledgedPromptResponse(init);
     },
   });
 
@@ -1623,13 +2337,129 @@ test("chrome send and end carries the end intent with queued prompts", async () 
     posts.map((post) => post.url),
     ["/api/abc/prompts"],
   );
+  assert.match(posts[0].body.batchId, /^[A-Za-z0-9_-]+$/);
+  delete posts[0].body.batchId;
   assert.deepEqual(posts[0].body, {
     prompts: [{ prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" }],
     domSnapshot: "uid=1 body",
+    reviewIncarnation: "review-incarnation-one",
     endSession: true,
   });
   assert.equal(chrome.queued().length, 0);
   assert.equal(chrome.element("chatInput").disabled, true);
+});
+
+test("artifact Send & End submits locally queued feedback before ending", async () => {
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return acknowledgedPromptResponse(init);
+    },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Queued inside the artifact", tag: "workflow-gate", selector: "main" },
+  });
+
+  chrome.sendFrameMessage({ type: "lavish:sendAndEnd" });
+  const request = chrome.postedToFrame.at(-1);
+  assert.equal(request.type, "lavish:requestSnapshot");
+  chrome.sendFrameMessage({
+    type: "lavish:snapshot",
+    requestId: request.requestId,
+    snapshot: "uid=1 workflow",
+  });
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.prompts[0].prompt, "Queued inside the artifact");
+  assert.equal(posts[0].body.endSession, true);
+  assert.equal(chrome.element("chatInput").disabled, true);
+});
+
+test("artifact Send & End ends directly when no local feedback is queued", async () => {
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init = {}) => {
+      posts.push({ url, method: init.method });
+      return { ok: true };
+    },
+  });
+
+  chrome.sendFrameMessage({ type: "lavish:sendAndEnd" });
+  await flushPromises();
+
+  assert.deepEqual(posts, [{ url: "/api/abc/end", method: "POST" }]);
+  assert.equal(chrome.element("chatInput").disabled, true);
+});
+
+test("chrome can send and end while presence says working", async () => {
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init = {}) => {
+      posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
+      return acknowledgedPromptResponse(init);
+    },
+  });
+
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "working" }) });
+  assert.equal(chrome.element("send").disabled, false);
+  assert.equal(chrome.element("sendAndEnd").disabled, false);
+
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Save this after the prior batch", selector: "main", tag: "feedback", text: "Follow-up" },
+  });
+  chrome.element("sendAndEnd").onclick();
+  chrome.sendFrameMessage({ type: "lavish:snapshot", snapshot: "uid=1 body" });
+  await flushPromises();
+  await flushPromises();
+
+  assert.match(posts[0].body.batchId, /^[A-Za-z0-9_-]+$/);
+  delete posts[0].body.batchId;
+  assert.deepEqual(posts, [
+    {
+      url: "/api/abc/prompts",
+      body: {
+        prompts: [
+          {
+            prompt: "Save this after the prior batch",
+            selector: "main",
+            tag: "feedback",
+            text: "Follow-up",
+          },
+        ],
+        domSnapshot: "uid=1 body",
+        reviewIncarnation: "review-incarnation-one",
+        endSession: true,
+      },
+    },
+  ]);
+  assert.equal(chrome.element("chatInput").disabled, true);
+});
+
+test("chrome distinguishes the authoritative host queue count from its unsent local queue", async () => {
+  const chrome = await createChromeHarness();
+
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "First", selector: "main", tag: "feedback", text: "First" },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Second", selector: "footer", tag: "feedback", text: "Second" },
+  });
+
+  let queueState = chrome.postedToFrame.at(-1);
+  assert.equal(queueState.type, "lavish:queueState");
+  assert.equal(queueState.count, 0);
+
+  chrome.eventSource().listeners.get("queue-state")({ data: JSON.stringify({ count: 6 }) });
+  queueState = chrome.postedToFrame.at(-1);
+  assert.equal(queueState.type, "lavish:queueState");
+  assert.equal(queueState.count, 6);
 });
 
 test("chrome send and end with an empty composer nudges instead of ending", async () => {
@@ -1646,7 +2476,7 @@ test("chrome send and end with an empty composer nudges instead of ending", asyn
   await flushPromises();
 
   assert.equal(posts.length, 0);
-  assert.equal(chrome.postedToFrame.length, 0);
+  assert.equal(chrome.postedToFrame.filter((message) => message.type !== "lavish:queueState").length, 0);
   assert.equal(chrome.element("sendHint").hidden, false);
   assert.equal(chrome.element("chatInput").focused, true);
   assert.equal(chrome.element("chatInput").disabled, false);
@@ -1662,7 +2492,7 @@ test("chrome send and end during an in-flight submit still ends after the submit
     fetchImpl: async (url, init = {}) => {
       posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
       if (posts.length === 1) await firstPost;
-      return { ok: true };
+      return acknowledgedPromptResponse(init);
     },
   });
 
@@ -1686,13 +2516,25 @@ test("chrome send and end during an in-flight submit still ends after the submit
 
   assert.deepEqual(
     posts.map((post) => post.url),
-    ["/api/abc/prompts", "/api/abc/end"],
+    ["/api/abc/prompts", "/api/abc/prompts"],
   );
+  assert.match(posts[0].body.batchId, /^[A-Za-z0-9_-]+$/);
+  assert.match(posts[1].body.batchId, /^[A-Za-z0-9_-]+$/);
+  assert.notEqual(posts[1].body.batchId, posts[0].body.batchId);
+  delete posts[0].body.batchId;
+  delete posts[1].body.batchId;
   assert.deepEqual(posts[0].body, {
     prompts: [{ prompt: "Ship this", selector: "button#ship", tag: "choice", text: "Ship" }],
     domSnapshot: "uid=1 body",
+    reviewIncarnation: "review-incarnation-one",
+    endSession: false,
   });
-  assert.equal(posts[1].body, null);
+  assert.deepEqual(posts[1].body, {
+    prompts: [],
+    domSnapshot: "uid=1 body",
+    reviewIncarnation: "review-incarnation-one",
+    endSession: true,
+  });
   assert.equal(chrome.queued().length, 0);
   assert.equal(chrome.element("chatInput").disabled, true);
 });
@@ -1768,6 +2610,86 @@ test("chrome client toggles annotation mode when the artifact SDK requests it vi
   assert.equal(chrome.postedToFrame.at(-1).enabled, true);
 });
 
+test("video review sessions start in explore mode and keep the annotation switch available", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: {
+      ...defaultSessionData,
+      initialAnnotationMode: false,
+      mediaTransportEnabled: true,
+    },
+  });
+
+  assert.equal(chrome.element("annotation")["aria-pressed"], "false");
+  chrome.element("annotation").click();
+  assert.equal(chrome.element("annotation")["aria-pressed"], "true");
+  assert.equal(chrome.postedToFrame.at(-1).type, "lavish:setAnnotationMode");
+  assert.equal(chrome.postedToFrame.at(-1).enabled, true);
+});
+
+test("chrome forwards video transport keys only when the review opts in", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, mediaTransportEnabled: true },
+  });
+
+  const space = chrome.dispatchDocumentKeydown({ key: " ", code: "Space", target: chrome.element("body") });
+  assert.equal(space.defaultPrevented, true);
+  assert.equal(chrome.postedToFrame.at(-1).type, "lavish:mediaTransport");
+  assert.equal(chrome.postedToFrame.at(-1).action.type, "toggle");
+
+  const right = chrome.dispatchDocumentKeydown({ key: "ArrowRight", target: chrome.element("body") });
+  assert.equal(right.defaultPrevented, true);
+  assert.equal(chrome.postedToFrame.at(-1).type, "lavish:mediaTransport");
+  assert.equal(chrome.postedToFrame.at(-1).action.type, "seek");
+  assert.equal(chrome.postedToFrame.at(-1).action.seconds, 5);
+
+  const modified = chrome.dispatchDocumentKeydown({ key: "l", metaKey: true, target: chrome.element("body") });
+  assert.equal(modified.defaultPrevented, false);
+});
+
+test("chrome never steals video transport keys from text entry controls", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, mediaTransportEnabled: true },
+  });
+  const textarea = {
+    closest(selector) {
+      return selector.includes("textarea") ? this : null;
+    },
+  };
+  const before = chrome.postedToFrame.length;
+
+  const event = chrome.dispatchDocumentKeydown({ key: " ", code: "Space", target: textarea });
+
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(chrome.postedToFrame.length, before);
+});
+
+test("chrome never steals video transport keys from marked or ARIA custom controls", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, mediaTransportEnabled: true },
+  });
+  const before = chrome.postedToFrame.length;
+  for (const marker of ["[data-lavish-action]", "[role='button']", "[role='slider']", "[tabindex]"]) {
+    const control = {
+      closest(selector) {
+        return selector.includes(marker) ? this : null;
+      },
+    };
+    const event = chrome.dispatchDocumentKeydown({ key: " ", code: "Space", target: control });
+    assert.equal(event.defaultPrevented, false, marker);
+  }
+  assert.equal(chrome.postedToFrame.length, before);
+});
+
+test("ordinary artifacts preserve native Space scrolling", async () => {
+  const chrome = await createChromeHarness();
+  const before = chrome.postedToFrame.length;
+
+  const event = chrome.dispatchDocumentKeydown({ key: " ", code: "Space", target: chrome.element("body") });
+
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(chrome.postedToFrame.length, before);
+});
+
 test("chrome client ignores annotation mode toggles after the session ends", async () => {
   const chrome = await createChromeHarness();
 
@@ -1823,7 +2745,7 @@ test("artifact relays cannot invoke whiteboard persistence", async () => {
   await flushPromises();
 
   assert.equal(calls.length, 0);
-  assert.equal(chrome.postedToFrame.length, 0);
+  assert.equal(chrome.postedToFrame.filter((message) => message.type !== "lavish:queueState").length, 0);
 });
 
 test("unverified whiteboard frames cannot invoke whiteboard persistence", async () => {
@@ -1888,6 +2810,30 @@ test("whiteboard fullscreen waits for the authenticated inline frame to flush", 
   assert.match(chrome.element("whiteboardFrame").src, /^\/whiteboard-frame\?diagramIndex=0$/);
 });
 
+test("whiteboard fullscreen timeout keeps the inline board and exposes retry guidance", async () => {
+  const chrome = await createChromeHarness({ fetchImpl: async (url) => whiteboardFetch(url) });
+  const inline = await initializeInlineWhiteboard(chrome);
+
+  chrome.sendInlineWhiteboardMessage(inline, {
+    type: "lavish-whiteboard:maximize",
+    diagramIndex: 0,
+    channelId: "inline-channel",
+  });
+  assert.equal(inline.posted.at(-1).type, "lavish-whiteboard:prepareTeardown");
+
+  chrome.runTimers(1500);
+  await flushPromises();
+
+  assert.equal(
+    chrome.postedToFrame.some((message) => message.type === "lavish:suspendWhiteboard"),
+    false,
+  );
+  assert.equal(chrome.element("whiteboardOverlay").hidden, false);
+  assert.match(chrome.element("whiteboardError").textContent, /still open.*retry/i);
+  chrome.element("whiteboardClose").click();
+  assert.equal(chrome.element("whiteboardOverlay").hidden, true);
+});
+
 test("whiteboard close waits for the authenticated overlay frame to flush", async () => {
   const chrome = await createChromeHarness({ fetchImpl: async (url) => whiteboardFetch(url) });
   const inline = await initializeInlineWhiteboard(chrome);
@@ -1923,6 +2869,35 @@ test("whiteboard close waits for the authenticated overlay frame to flush", asyn
 
   assert.equal(chrome.element("whiteboardFrame").src, "about:blank");
   assert.equal(chrome.postedToFrame.at(-1).type, "lavish:resumeWhiteboard");
+});
+
+test("whiteboard close timeout keeps the overlay board and exposes retry guidance", async () => {
+  const chrome = await createChromeHarness({ fetchImpl: async (url) => whiteboardFetch(url) });
+  const inline = await initializeInlineWhiteboard(chrome);
+  chrome.sendInlineWhiteboardMessage(inline, {
+    type: "lavish-whiteboard:maximize",
+    diagramIndex: 0,
+    channelId: "inline-channel",
+  });
+  const maximizePrepare = inline.posted.at(-1);
+  chrome.sendInlineWhiteboardMessage(inline, {
+    type: "lavish-whiteboard:teardownReady",
+    diagramIndex: 0,
+    channelId: "inline-channel",
+    flushId: maximizePrepare.flushId,
+  });
+  chrome.sendWhiteboardMessage({ type: "lavish-whiteboard:ready", diagramIndex: 0, channelToken: "overlay-channel" });
+  await flushPromises();
+  await flushPromises();
+  const overlaySrc = chrome.element("whiteboardFrame").src;
+
+  chrome.element("whiteboardClose").click();
+  chrome.runTimers(1500);
+  await flushPromises();
+
+  assert.equal(chrome.element("whiteboardFrame").src, overlaySrc);
+  assert.equal(chrome.element("whiteboardOverlay").hidden, false);
+  assert.match(chrome.element("whiteboardError").textContent, /still open.*retry/i);
 });
 
 test("whiteboard fullscreen close accepts the resumed inline frame", async () => {
@@ -1994,6 +2969,24 @@ test("artifact reload waits for inline whiteboards to flush", async () => {
     chrome.element("artifact").src,
     /^\/artifact\/abc\/index\.html\?artifact_revision=\d+&artifact_load_token=/,
   );
+});
+
+test("artifact reload timeout keeps the current board and exposes retry guidance", async () => {
+  const chrome = await createChromeHarness({
+    artifactSrc: "/artifact/abc/index.html",
+    fetchImpl: async (url) => whiteboardFetch(url),
+  });
+  const inline = await initializeInlineWhiteboard(chrome);
+  const initialLoadCount = chrome.srcLoads.length;
+
+  chrome.element("reloadArtifact").click();
+  assert.equal(inline.posted.at(-1).type, "lavish-whiteboard:prepareTeardown");
+  chrome.runTimers(1500);
+  await flushPromises();
+
+  assert.equal(chrome.srcLoads.length, initialLoadCount);
+  assert.equal(chrome.element("whiteboardOverlay").hidden, false);
+  assert.match(chrome.element("whiteboardError").textContent, /still open.*retry/i);
 });
 
 test("server restart flushes an authenticated inline whiteboard before reloading", async () => {

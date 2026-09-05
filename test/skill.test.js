@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createHomeOutput } from "../src/cli.js";
+import { POLL_WAKE_PATH_RULES, createHomeOutput } from "../src/cli.js";
+import { MERMAID_CDN_URL } from "../src/design-reference.js";
 import {
   ALLOWED_SKILL_FRONTMATTER_KEYS,
   SKILL_DESCRIPTION,
@@ -9,6 +10,11 @@ import {
   parseSkillFrontmatter,
   validateSkillMarkdown,
 } from "../src/skill.js";
+import {
+  WHITEBOARD_SKILL_DESCRIPTION,
+  createWhiteboardSkillMarkdown,
+  createWhiteboardTemplateHtml,
+} from "../src/whiteboard-skill.js";
 
 function skillCommandText(text) {
   return text;
@@ -20,6 +26,33 @@ test("createSkillMarkdown emits valid frontmatter naming the George Showroom ski
   assert.deepEqual(errors, [], "frontmatter parses as plain block-style YAML");
   assert.equal(frontmatter.name, "george-showroom");
   assert.equal(frontmatter.description, SKILL_DESCRIPTION);
+});
+
+test("createWhiteboardSkillMarkdown publishes a focused infinite-canvas profile", () => {
+  const markdown = createWhiteboardSkillMarkdown();
+  const { frontmatter, errors } = parseSkillFrontmatter(markdown);
+  const validation = validateSkillMarkdown(markdown, { directoryName: "george-showroom-whiteboard" });
+
+  assert.deepEqual(errors, []);
+  assert.equal(frontmatter.name, "george-showroom-whiteboard");
+  assert.equal(frontmatter.description, WHITEBOARD_SKILL_DESCRIPTION);
+  assert.deepEqual(validation.errors, []);
+  assert.ok(validation.valid);
+  assert.match(markdown, /one full-canvas Mermaid seed/i);
+  assert.match(markdown, /never overwrite.*\.excalidraw/i);
+  assert.match(markdown, /Queue feedback/i);
+  for (const rule of POLL_WAKE_PATH_RULES) {
+    assert.ok(markdown.includes(rule), `includes polling wake-path rule: ${rule.slice(0, 40)}...`);
+  }
+});
+
+test("createWhiteboardTemplateHtml emits a single full-viewport editable diagram", () => {
+  const html = createWhiteboardTemplateHtml();
+
+  assert.equal((html.match(/class="mermaid"/g) || []).length, 1);
+  assert.match(html, /min-height:\s*calc\(100vh/);
+  assert.match(html, /flowchart TD/);
+  assert.ok(html.includes(`import mermaid from "${MERMAID_CDN_URL}"`));
 });
 
 test("createSkillMarkdown retains a valid temporary Lavish compatibility skill", () => {

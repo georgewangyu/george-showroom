@@ -7,6 +7,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { createSkillMarkdown } from "../src/skill.js";
+import { createWhiteboardSkillMarkdown, createWhiteboardTemplateHtml } from "../src/whiteboard-skill.js";
 
 const targets = [
   {
@@ -16,6 +17,14 @@ const targets = [
   {
     url: new URL("../skills/lavish/SKILL.md", import.meta.url),
     expected: createSkillMarkdown({ compatibilityAlias: true }),
+  },
+  {
+    url: new URL("../skills/george-showroom-whiteboard/SKILL.md", import.meta.url),
+    expected: createWhiteboardSkillMarkdown(),
+  },
+  {
+    url: new URL("../skills/george-showroom-whiteboard/assets/whiteboard.html", import.meta.url),
+    expected: createWhiteboardTemplateHtml(),
   },
 ];
 const check = process.argv.includes("--check");

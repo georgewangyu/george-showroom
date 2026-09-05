@@ -2,14 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyMediaTransport,
   classifyMaterialRectEscape,
   classifySevereTextOverflow,
   deriveLavishQueueKey,
   findStableLayoutFindings,
   isMaterialPageOverflow,
+  isMediaTransportBlockedEvent,
+  isMediaTransportBlockedTarget,
   isModeToggleHotkeyEvent,
   isNativeInteractiveControl,
   isNearTotalOcclusion,
+  mediaTransportActionForEvent,
 } from "../src/artifact-sdk.js";
 
 function node(tag, attrs = {}, children = []) {
@@ -63,6 +67,13 @@ function matchesSelectorList(el, selectorList) {
 function matchesSelector(el, selector) {
   if (selector === "form" || selector === "fieldset") return el.tagName.toLowerCase() === selector;
   if (selector === "[data-lavish-question]") return el.getAttribute("data-lavish-question") !== null;
+  if (selector === "[data-lavish-action]") return el.getAttribute("data-lavish-action") !== null;
+  if (selector === "[tabindex]:not([tabindex='-1'])") {
+    const value = el.getAttribute("tabindex");
+    return value !== null && value !== "-1";
+  }
+  const roleMatch = selector.match(/^\[role='([^']+)'\]$/);
+  if (roleMatch) return el.getAttribute("role") === roleMatch[1];
   if (selector === "[contenteditable]:not([contenteditable='false'])") {
     const value = el.getAttribute("contenteditable");
     return value !== null && value !== "false";
@@ -323,4 +334,79 @@ test("isModeToggleHotkeyEvent rejects extra shift or alt modifiers", () => {
 test("isModeToggleHotkeyEvent ignores other keys even with a modifier held", () => {
   assert.equal(isModeToggleHotkeyEvent({ key: "e", metaKey: true }), false);
   assert.equal(isModeToggleHotkeyEvent({ key: "Enter", metaKey: true }), false);
+});
+
+test("media transport maps conventional playback and seek keys", () => {
+  assert.deepEqual(mediaTransportActionForEvent({ key: " " }), { type: "toggle" });
+  assert.deepEqual(mediaTransportActionForEvent({ key: "K" }), { type: "toggle" });
+  assert.deepEqual(mediaTransportActionForEvent({ key: "j" }), { type: "seek", seconds: -10 });
+  assert.deepEqual(mediaTransportActionForEvent({ key: "L" }), { type: "seek", seconds: 10 });
+  assert.deepEqual(mediaTransportActionForEvent({ key: "ArrowLeft" }), { type: "seek", seconds: -5 });
+  assert.deepEqual(mediaTransportActionForEvent({ key: "ArrowRight" }), { type: "seek", seconds: 5 });
+});
+
+test("media transport leaves modifiers, composition, and repeated toggles to the browser", () => {
+  assert.equal(mediaTransportActionForEvent({ key: " ", metaKey: true }), null);
+  assert.equal(mediaTransportActionForEvent({ key: "k", ctrlKey: true }), null);
+  assert.equal(mediaTransportActionForEvent({ key: "j", altKey: true }), null);
+  assert.equal(mediaTransportActionForEvent({ key: "ArrowRight", shiftKey: true }), null);
+  assert.equal(mediaTransportActionForEvent({ key: "k", isComposing: true }), null);
+  assert.equal(mediaTransportActionForEvent({ key: " ", repeat: true }), null);
+  assert.deepEqual(mediaTransportActionForEvent({ key: "ArrowRight", repeat: true }), {
+    type: "seek",
+    seconds: 5,
+  });
+});
+
+test("media transport never captures keys from editable or interactive controls", () => {
+  assert.equal(isMediaTransportBlockedTarget(node("input")), true);
+  assert.equal(isMediaTransportBlockedTarget(node("textarea")), true);
+  assert.equal(isMediaTransportBlockedTarget(node("select")), true);
+  assert.equal(isMediaTransportBlockedTarget(node("div", { contenteditable: "true" })), true);
+  assert.equal(isMediaTransportBlockedTarget(node("button")), true);
+  assert.equal(isMediaTransportBlockedTarget(node("div", { "data-lavish-action": "queue" })), true);
+  assert.equal(isMediaTransportBlockedTarget(node("div", { role: "button", tabindex: "0" })), true);
+  assert.equal(isMediaTransportBlockedTarget(node("div", { role: "slider" })), true);
+  assert.equal(isMediaTransportBlockedTarget(node("div", { tabindex: "0" })), true);
+  assert.equal(isMediaTransportBlockedTarget(node("video")), false);
+  assert.equal(isMediaTransportBlockedTarget(node("video", { role: "button", tabindex: "0" })), false);
+  assert.equal(isMediaTransportBlockedTarget(node("main")), false);
+});
+
+test("media transport blocks nested video controls while preserving the exact video surface", () => {
+  const nestedAction = node("div", { "data-lavish-action": "queue" });
+  const video = node("video", {}, [nestedAction]);
+  assert.equal(isMediaTransportBlockedEvent({ target: nestedAction, composedPath: () => [nestedAction, video] }), true);
+
+  const wrapper = node("div", { role: "button", tabindex: "0" }, [video]);
+  assert.equal(isMediaTransportBlockedEvent({ target: video, composedPath: () => [video, wrapper] }), false);
+});
+
+test("media transport toggles playback and clamps seeks to media bounds", () => {
+  let plays = 0;
+  let pauses = 0;
+  const media = {
+    currentTime: 18,
+    duration: 20,
+    ended: false,
+    paused: true,
+    play() {
+      plays += 1;
+      return Promise.resolve();
+    },
+    pause() {
+      pauses += 1;
+    },
+  };
+
+  assert.equal(applyMediaTransport(media, { type: "toggle" }), true);
+  assert.equal(plays, 1);
+  media.paused = false;
+  assert.equal(applyMediaTransport(media, { type: "toggle" }), true);
+  assert.equal(pauses, 1);
+  assert.equal(applyMediaTransport(media, { type: "seek", seconds: 5 }), true);
+  assert.equal(media.currentTime, 20);
+  assert.equal(applyMediaTransport(media, { type: "seek", seconds: -30 }), true);
+  assert.equal(media.currentTime, 0);
+  assert.equal(applyMediaTransport(media, { type: "unknown" }), false);
 });

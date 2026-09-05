@@ -19,10 +19,17 @@ import { EXCALIDRAW_SCENE_TARGET_TYPE, normalizeExcalidrawSceneTarget } from "./
 
 export const LAYOUT_WARNINGS_TARGET_TYPE = "layout-warnings";
 const MAX_ARTIFACT_FAILURES = 20;
+export const MAX_SUBMISSION_RECEIPTS = 256;
+export const MAX_SUBMISSION_RECEIPT_BYTES = 256 * 1024;
 
 export class SessionStore {
-  constructor(file) {
+  constructor(
+    file,
+    { maxSubmissionReceipts = MAX_SUBMISSION_RECEIPTS, maxSubmissionReceiptBytes = MAX_SUBMISSION_RECEIPT_BYTES } = {},
+  ) {
     this.file = file;
+    this.maxSubmissionReceipts = maxSubmissionReceipts;
+    this.maxSubmissionReceiptBytes = maxSubmissionReceiptBytes;
     /** @type {Promise<unknown>} */
     this.stateOperationQueue = Promise.resolve();
     this.artifactLoads = new Map();
@@ -57,6 +64,11 @@ export class SessionStore {
     return this.runExclusive(async () => {
       const state = await this.readState();
       const existing = state.sessions[key] || {};
+      const startsNewReviewIncarnation = existing.status === "ended";
+      const reviewIncarnation =
+        startsNewReviewIncarnation || !normalizeReviewIncarnation(existing.review_incarnation)
+          ? createReviewIncarnation()
+          : normalizeReviewIncarnation(existing.review_incarnation);
       const existingPrompts = existing.prompts || [];
       const existingStatus = existing.status === "ended" ? "open" : existing.status || "open";
       const session = {
@@ -73,6 +85,13 @@ export class SessionStore {
         artifact_failures: Array.isArray(existing.artifact_failures) ? existing.artifact_failures : [],
         dom_snapshot: existing.dom_snapshot || "",
         chat: existing.chat || [],
+        review_incarnation: reviewIncarnation,
+        // An explicit reopen starts a new review incarnation. Old browser batches must not be
+        // mistaken for retries in the new review, and their receipts no longer need to occupy
+        // the bounded retry ledger.
+        submission_receipts: startsNewReviewIncarnation
+          ? []
+          : normalizeSubmissionReceipts(existing.submission_receipts, reviewIncarnation),
         updated_at: new Date().toISOString(),
       };
       state.sessions[key] = session;
@@ -81,7 +100,7 @@ export class SessionStore {
     });
   }
 
-  async queuePrompts(key, payload) {
+  async queuePrompts(key, payload, { requireReviewIncarnation = false } = {}) {
     return this.runExclusive(async () => {
       const state = await this.readState();
       const session = state.sessions[key];
@@ -89,9 +108,55 @@ export class SessionStore {
         return null;
       }
       const prompts = Array.isArray(payload.prompts) ? payload.prompts : [];
+      const batchId = normalizeSubmissionBatchId(payload.batchId || payload.batch_id);
+      const reviewIncarnation = normalizeReviewIncarnation(session.review_incarnation) || createReviewIncarnation();
+      session.review_incarnation = reviewIncarnation;
+      const submittedReviewIncarnation = normalizeReviewIncarnation(
+        payload.reviewIncarnation || payload.review_incarnation,
+      );
+      if (
+        (requireReviewIncarnation && batchId && !submittedReviewIncarnation) ||
+        (submittedReviewIncarnation && submittedReviewIncarnation !== reviewIncarnation)
+      ) {
+        return {
+          stale_review_incarnation: true,
+          review_incarnation: reviewIncarnation,
+          session,
+        };
+      }
+      const receipts = normalizeSubmissionReceipts(session.submission_receipts, reviewIncarnation);
       const shouldEndSession = Boolean(payload.endSession || payload.end_session);
-      const alreadyEnded = session.status === "ended";
       const normalizedPrompts = prompts.map(normalizePrompt);
+      const domSnapshot = String(payload.domSnapshot || payload.dom_snapshot || "");
+      const payloadDigest = submissionPayloadDigest({
+        prompts: normalizedPrompts,
+        dom_snapshot: domSnapshot,
+        end_session: shouldEndSession,
+      });
+      const existingReceipt = batchId ? receipts.find((receipt) => receipt.batch_id === batchId) : null;
+      if (existingReceipt) {
+        if (
+          existingReceipt.review_incarnation !== reviewIncarnation ||
+          existingReceipt.payload_digest !== payloadDigest
+        ) {
+          return {
+            submission_conflict: true,
+            conflict_type: "batch-id-reused",
+            session,
+          };
+        }
+        return {
+          ...session,
+          submission_receipt: { ...existingReceipt, duplicate: true },
+        };
+      }
+      if (batchId && receipts.length >= this.maxSubmissionReceipts) {
+        return { receipt_capacity: true, session };
+      }
+      const alreadyEnded = session.status === "ended";
+      const submittedTimestampedNotes = normalizedPrompts.filter(isTimestampedVideoPrompt).length;
+      const submittedMessages = normalizedPrompts.filter((prompt) => prompt.tag === "message" && prompt.prompt).length;
+      const submittedLayoutWarnings = normalizedPrompts.filter(isLayoutWarningPrompt).length;
       const revision = normalizeRevision(session.artifact_revision);
       const at = new Date().toISOString();
       let warnings = normalizeStoredWarnings(session.layout_warnings);
@@ -139,12 +204,43 @@ export class SessionStore {
       session.prompts = [...(session.prompts || []), ...acceptedPrompts];
       session.chat = [...(session.chat || []), ...userMessages];
       session.pending_prompts = session.prompts.length;
-      session.dom_snapshot = String(payload.domSnapshot || payload.dom_snapshot || "");
+      session.dom_snapshot = domSnapshot;
       session.status = shouldEndSession || alreadyEnded ? "ended" : session.prompts.length > 0 ? "feedback" : "open";
       if (shouldEndSession) session.ended_by = "user";
+      const receipt = batchId
+        ? {
+            batch_id: batchId,
+            submitted_prompts: normalizedPrompts.length,
+            processed_prompts: normalizedPrompts.length,
+            submitted_timestamped_notes: submittedTimestampedNotes,
+            submitted_messages: submittedMessages,
+            submitted_layout_warnings: submittedLayoutWarnings,
+            accepted_prompts: acceptedPrompts.length,
+            timestamped_notes: acceptedPrompts.filter(isTimestampedVideoPrompt).length,
+            messages: userMessages.length,
+            deduplicated_layout_warnings:
+              submittedLayoutWarnings - acceptedPrompts.filter(isLayoutWarningPrompt).length,
+            end_session: shouldEndSession,
+            review_incarnation: reviewIncarnation,
+            payload_digest: payloadDigest,
+            committed_at: at,
+          }
+        : null;
+      const nextReceipts = receipt ? [...receipts, receipt] : receipts;
+      // Never evict an unresolved retry identity: doing so would turn a response-loss retry into
+      // a new commit. Bound both count and serialized size instead, and fail closed before any
+      // prompt/session mutation is written. An explicit review reopen starts a fresh incarnation.
+      if (
+        receipt &&
+        (nextReceipts.length > this.maxSubmissionReceipts ||
+          Buffer.byteLength(JSON.stringify(nextReceipts), "utf8") > this.maxSubmissionReceiptBytes)
+      ) {
+        return { receipt_capacity: true, session: state.sessions[key] };
+      }
+      session.submission_receipts = nextReceipts;
       session.updated_at = new Date().toISOString();
       await this.writeState(state);
-      return session;
+      return receipt ? { ...session, submission_receipt: { ...receipt, duplicate: false } } : session;
     });
   }
 
@@ -547,6 +643,78 @@ function normalizePrompt(prompt) {
   const target = normalizeTarget(prompt.target);
   if (target) normalized.target = target;
   return normalized;
+}
+
+function normalizeSubmissionBatchId(value) {
+  const batchId = String(value || "").trim();
+  return /^[A-Za-z0-9_-]{1,120}$/.test(batchId) ? batchId : "";
+}
+
+function createReviewIncarnation() {
+  return crypto.randomBytes(18).toString("base64url");
+}
+
+function normalizeReviewIncarnation(value) {
+  const incarnation = String(value || "").trim();
+  return /^[A-Za-z0-9_-]{16,120}$/.test(incarnation) ? incarnation : "";
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function submissionPayloadDigest(value) {
+  return crypto.createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function normalizeSubmissionReceipts(value, reviewIncarnation = "") {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((receipt) => receipt && typeof receipt === "object" && normalizeSubmissionBatchId(receipt.batch_id))
+    .map((receipt) => {
+      const acceptedPrompts = Math.max(0, Number(receipt.accepted_prompts) || 0);
+      const timestampedNotes = Math.max(0, Number(receipt.timestamped_notes) || 0);
+      const messages = Math.max(0, Number(receipt.messages) || 0);
+      const submittedPrompts = Math.max(acceptedPrompts, Number(receipt.submitted_prompts) || 0);
+      return {
+        batch_id: normalizeSubmissionBatchId(receipt.batch_id),
+        submitted_prompts: submittedPrompts,
+        processed_prompts: Math.max(submittedPrompts, Number(receipt.processed_prompts) || 0),
+        submitted_timestamped_notes: Math.max(timestampedNotes, Number(receipt.submitted_timestamped_notes) || 0),
+        submitted_messages: Math.max(messages, Number(receipt.submitted_messages) || 0),
+        submitted_layout_warnings: Math.max(0, Number(receipt.submitted_layout_warnings) || 0),
+        accepted_prompts: acceptedPrompts,
+        timestamped_notes: timestampedNotes,
+        messages,
+        deduplicated_layout_warnings: Math.max(0, Number(receipt.deduplicated_layout_warnings) || 0),
+        end_session: receipt.end_session === true,
+        review_incarnation:
+          normalizeReviewIncarnation(receipt.review_incarnation) || normalizeReviewIncarnation(reviewIncarnation),
+        payload_digest: /^[a-f0-9]{64}$/.test(String(receipt.payload_digest || ""))
+          ? String(receipt.payload_digest)
+          : "",
+        committed_at: String(receipt.committed_at || ""),
+      };
+    });
+}
+
+function isTimestampedVideoPrompt(prompt) {
+  return (
+    prompt?.target?.type === "video-timecode" &&
+    Object.hasOwn(prompt.target, "currentTime") &&
+    Number.isFinite(Number(prompt.target.currentTime))
+  );
+}
+
+function isLayoutWarningPrompt(prompt) {
+  return prompt?.tag === "layout-warnings" && prompt?.target?.type === LAYOUT_WARNINGS_TARGET_TYPE;
 }
 
 function layoutWarningPromptIds(prompt) {

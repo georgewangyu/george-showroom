@@ -66,23 +66,27 @@ npm install --global .
 george-showroom --help
 ```
 
-Install the generated George Showroom skill from the local checkout with
+Install either generated public skill from the local checkout with
 [`npx skills`](https://github.com/vercel-labs/skills):
 
 ```sh
 npx skills add . --skill george-showroom
+npx skills add . --skill george-showroom-whiteboard
 ```
 
 The skill teaches your agent to use that trusted local installation. It deliberately does not execute the currently unclaimed npm package name through `npx -y`; that path remains disabled until an owner-approved release is documented here.
 In restricted subprocess sandboxes, CI, or agent harnesses, the skill also documents the direct global-install path.
 Its frontmatter also includes Hermes Agent metadata, so Hermes-compatible harnesses can categorize and surface it as a first-class productivity skill.
-This installs the public `george-showroom` skill.
+The first profile builds reviewable reports, diagrams, and interfaces. The
+`george-showroom-whiteboard` profile builds one large editable spatial canvas
+for mind maps, decision trees, and collaborative visual outlining.
 The repository also retains the inherited internal `lavish-design` brand skill as upstream design reference material; default `npx skills add ... --list` and skills.sh discovery hide it unless `INSTALL_INTERNAL_SKILLS=1` is set.
 
 Then, in agents that expose skills as slash commands (Claude Code, for example), invoke it directly:
 
 ```
 /george-showroom let's discuss our plan here
+/george-showroom-whiteboard map the product decision tree
 ```
 
 Or just ask for anything that is easier to grasp visually - a plan, comparison, diagram, table, code view, or report - and the agent loads the skill on its own when it recognizes the task.
@@ -140,7 +144,11 @@ To register by hand instead, point any client at the package directory (`npm roo
 | GitHub Copilot CLI | `copilot plugin install <package-dir>` (or `copilot plugin install georgewangyu/george-showroom` straight from the repo) |
 
 Codex and ChatGPT install plugins only from marketplace sources, so Codex users should use the session hook above instead.
-George Showroom declares no MCP server - the CLI itself is the agent interface - so a plugin install brings the same `george-showroom` skill, and the skill and plugin are alternatives rather than a stack.
+George Showroom declares no MCP server - the CLI itself is the agent interface.
+A plugin install discovers both public profiles, `george-showroom` and
+`george-showroom-whiteboard`, plus the temporary hidden-by-default `lavish`
+compatibility alias. Direct skill installation and plugin registration are
+alternative discovery paths rather than a stack.
 
 ### From source
 
@@ -197,7 +205,7 @@ pnpm link
   `Resolved` requires a newer successful artifact load plus a complete check at the same viewport that no longer detects it; it then leaves the count but keeps a bounded history.
   `Still present` (recurring) means a queued issue survived a newer revision, so it is selectable again with its earlier attempt retained. `Unverified` means a reload or check failed or was incomplete, so the prior issue was preserved rather than cleared. `Returned` means a resolved issue came back on a later revision.
   Dismissal applies only to the current artifact revision; a later revision surfaces the issue again if it is still detected. A check at one viewport never clears an issue found at another, and a viewport removed from the configured diagnostic set (`LAVISH_AXI_DIAGNOSTIC_VIEWPORTS`, default all) is marked obsolete with an explicit reason rather than reading as fixed.
-- **Local assets** - Copy local images, CSS, fonts, and scripts next to the HTML artifact and reference them with relative paths from that directory; root-prefixed paths such as `/assets/logo.png` will not resolve through George Showroom's artifact route.
+- **Local assets** - Copy local images, CSS, fonts, scripts, and browser-decodable review media next to the HTML artifact and reference them with relative paths from that directory; root-prefixed paths such as `/assets/logo.png` will not resolve through George Showroom's artifact route. Artifact media responses support HTTP byte ranges, so native video players can seek through local review proxies; validate a representative `Range` request when playback is part of the review gate.
 - **Default artifact location** - Unless another location is requested, agents create Showroom artifacts under `georgesshowroom/` in the current working directory. Existing artifacts at any path, including legacy `.lavish/` paths, remain valid because the CLI opens the explicit HTML path supplied to it.
 - **Repository boundary** - Keep private or person-specific artifacts in their owning private repository or media project, not in the George Showroom product checkout. The CLI accepts an HTML path from anywhere on the machine; a public `examples/` directory is only for intentionally public, generic synthetic fixtures.
 - **Export and sharing** - `george-showroom export` writes `<name>.export.html` by inlining local assets only, stripping the annotation SDK, and leaving remote CDN/font references as links that still need network access.
@@ -213,10 +221,13 @@ pnpm link
   Mark only custom (non-native) clickable elements with `data-lavish-action` so George Showroom does not annotate them, and use `data-lavish-question` or `queueKey` when pre-send updates for the same question should replace each other.
   Queued annotation preview pills and chat history share a scrollable Conversation panel above a sticky composer, so long feedback queues do not push the text box or send controls off screen.
   The browser chrome keeps editing actions in the overflow menu (copy path, reload artifact, copy DOM snapshot, export standalone HTML, publish link, end session), while the composer exposes **Send & End** beside **Send to Agent** to submit queued prompts and user-ended attribution together.
+  Each send uses one idempotent batch containing all queued annotations plus the optional composer message. The chrome shows an explicit sending, sent, or retryable-error status; it keeps the complete local batch until the server acknowledges its durable commit and exactly accounts for every submitted item. Timecoded notes and messages must be delivered exactly; only an explicitly counted, already-satisfied layout repair may be terminally deduplicated. Receipts bind the batch ID to its canonical payload and server-issued review incarnation, which is frozen with the browser's pending batch. The current incarnation keeps a bounded retry ledger and fails closed instead of evicting an unresolved identity; an explicit review reopen starts a fresh incarnation, and a stale prior-review batch remains locally retained rather than replaying. At capacity or after a stale-incarnation rejection, the chrome offers **Copy retained feedback** and a deliberate **Unlock for requeue** decision; it never migrates, rotates, or replays the batch automatically. A successful mixed batch reports, for example, **Sent 6 timestamped notes + 1 message.**
 - **Keyboard shortcuts** - In the chrome composer, Enter sends queued prompts and Shift+Enter inserts a newline.
   In the annotation card, Enter queues the annotation, Shift+Enter inserts a newline, and Ctrl+Enter (Cmd+Enter on macOS) queues it and sends all queued prompts immediately.
   Cmd+I or Ctrl+I toggles between annotate and explore mode from either the browser chrome or the artifact iframe, including while focus is in a textarea or control.
-- **Agent presence** - The browser shows when no agent is listening, keeps queued feedback for the next successful `george-showroom poll` send even across reloads, and only blocks human sends while the agent is working on delivered feedback; the agent's reply (`--agent-reply`) concludes that work and re-enables sends.
+  Video-review artifacts can opt into host-integrated transport with `<meta name="lavish-media-transport" content="video">`: Space or K toggles play/pause, J/L seeks by 10 seconds, and Left/Right seeks by 5 seconds. These keys are ignored in inputs, textareas, selects, contenteditable regions, interactive controls, and whenever a modifier key is held; ordinary artifacts retain native Space scrolling.
+  An artifact can start in explore mode with `<meta name="lavish-annotation-mode" content="off">`; the visible Annotate switch and Cmd/Ctrl+I shortcut remain available.
+- **Agent presence** - The browser shows when no agent is listening and keeps queued feedback for the next successful `george-showroom poll` of that exact artifact, even across reloads. Presence is advisory and never disables **Send to Agent**, **Send & End**, or layout-feedback queueing: a wrong-artifact poll, missing poll, or stale `working` marker must not prevent durable submission. **Send & End** stores the queued prompts and user-ended state together before the browser closes the review; a later correct-artifact poll receives that final batch exactly once. The injected SDK exposes the server's authoritative pending-prompt count through `getQueueState()` and `lavish:queueState` without exposing prompt contents. The agent's reply (`--agent-reply`) still concludes the visible working state.
   The no-timeout poll always writes an immediate stderr banner so it is visibly not hung; it adds the periodic stderr wait ticks only in an interactive terminal, so when stderr is piped (as under agent harnesses) the captured output carries no tick noise. Stdout always stays reserved for the final response; if the poll is interrupted or times out, re-run it because queued feedback is never lost.
   Codex-specific guidance keeps that poll attached to the active turn instead of hiding it in a background task, because completed background tasks may not resume the agent.
 - **Session end etiquette** - George Showroom tracks who ended a session: a human clicking **End session** (or **Send & end session**) in the browser is a user-initiated end, while `george-showroom end <html-file>` is agent-initiated.

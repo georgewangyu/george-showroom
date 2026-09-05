@@ -134,11 +134,11 @@ test("the package root is itself a discoverable Agent Plugin", async () => {
   );
   assert.deepEqual(
     discovered.map((entry) => entry.name).sort(),
-    ["george-showroom", "lavish"],
-    "the primary skill and temporary compatibility alias are discovered",
+    ["george-showroom", "george-showroom-whiteboard", "lavish"],
+    "the primary skill, whiteboard profile, and temporary compatibility alias are discovered",
   );
 
-  for (const directoryName of ["george-showroom", "lavish"]) {
+  for (const directoryName of ["george-showroom", "george-showroom-whiteboard", "lavish"]) {
     const skill = await readFile(path.join(root, "skills", directoryName, "SKILL.md"), "utf8");
     assert.deepEqual(validateSkillMarkdown(skill, { directoryName }).errors, []);
   }

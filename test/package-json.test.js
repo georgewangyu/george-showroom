@@ -36,6 +36,7 @@ test("published package includes the installable skill", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
   assert.ok(packageJson.files.includes("skills/george-showroom"));
+  assert.ok(packageJson.files.includes("skills/george-showroom-whiteboard"));
   assert.ok(packageJson.files.includes("skills/lavish"));
   assert.equal(
     packageJson.files.some((entry) => entry.includes("lavish-editor-marketing")),
@@ -51,6 +52,7 @@ test("published package root is a complete Agent Plugin", async () => {
 
   assert.ok(packageJson.files.includes("plugin.json"));
   assert.ok(packageJson.files.includes("skills/george-showroom"));
+  assert.ok(packageJson.files.includes("skills/george-showroom-whiteboard"));
   assert.ok(packageJson.files.includes("skills/lavish"));
 });
 

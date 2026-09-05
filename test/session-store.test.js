@@ -63,6 +63,167 @@ test("queued prompts are returned with DOM snapshot context and then cleared", a
   }
 });
 
+test("a timestamped annotation batch is atomic, idempotent, and preserves exact currentTime", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<video></video>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const exactTimes = [0.1256789, 12.3456789, 24.6789012, 36.9012345, 48.2345678, 59.9999999];
+    /** @type {any[]} */
+    const prompts = exactTimes.map((currentTime) => ({
+      uid: "",
+      prompt: `Timecoded note at ${currentTime}`,
+      selector: "video",
+      tag: "feedback",
+      text: String(currentTime),
+      target: { type: "video-timecode", currentTime },
+    }));
+    prompts.push({ uid: "", prompt: "General pacing note", selector: "", tag: "message", text: "Freeform message" });
+
+    const first = await store.queuePrompts(session.key, {
+      batchId: "batch-six-plus-one",
+      domSnapshot: "uid=1 video",
+      prompts,
+    });
+    assert.equal(first.submission_receipt.accepted_prompts, 7);
+    assert.equal(first.submission_receipt.timestamped_notes, 6);
+    assert.equal(first.submission_receipt.messages, 1);
+    assert.equal(first.submission_receipt.duplicate, false);
+
+    const delivered = feedbackResult(await store.takeFeedback(session.key));
+    assert.deepEqual(
+      delivered.prompts.slice(0, 6).map((prompt) => prompt.target.currentTime),
+      exactTimes,
+    );
+
+    const retry = await store.queuePrompts(session.key, {
+      batchId: "batch-six-plus-one",
+      domSnapshot: "uid=1 video",
+      prompts,
+    });
+    assert.equal(retry.submission_receipt.duplicate, true);
+    assert.equal(retry.submission_receipt.accepted_prompts, 7);
+    assert.equal((await store.takeFeedback(session.key)).status, "waiting");
+
+    for (let index = 0; index < 101; index += 1) {
+      await store.queuePrompts(session.key, {
+        batchId: `later-batch-${index}`,
+        prompts: [{ prompt: `Later note ${index}`, tag: "feedback" }],
+      });
+      feedbackResult(await store.takeFeedback(session.key));
+    }
+    const delayedRetry = await store.queuePrompts(session.key, {
+      batchId: "batch-six-plus-one",
+      domSnapshot: "uid=1 video",
+      prompts,
+    });
+    assert.equal(delayedRetry.submission_receipt.duplicate, true, "idempotency lasts for the session lifetime");
+    assert.equal((await store.takeFeedback(session.key)).status, "waiting");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("submission identities are payload-bound and reject equal-count content collisions", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<video></video>");
+
+    const store = new SessionStore(stateFile);
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const first = await store.queuePrompts(session.key, {
+      batchId: "payload-bound-batch",
+      prompts: [{ prompt: "Keep this frame", tag: "feedback" }],
+    });
+    assert.equal(first.submission_receipt.duplicate, false);
+
+    const collision = await store.queuePrompts(session.key, {
+      batchId: "payload-bound-batch",
+      prompts: [{ prompt: "Delete this frame", tag: "feedback" }],
+    });
+    assert.equal(collision.submission_conflict, true);
+    assert.equal(collision.conflict_type, "batch-id-reused");
+
+    const delivered = feedbackResult(await store.takeFeedback(session.key));
+    assert.deepEqual(
+      delivered.prompts.map((prompt) => prompt.prompt),
+      ["Keep this frame"],
+    );
+    assert.equal((await store.takeFeedback(session.key)).status, "waiting");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("submission receipts fail closed at a bounded budget and reset on a new review incarnation", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<video></video>");
+
+    const store = new SessionStore(stateFile, { maxSubmissionReceipts: 2, maxSubmissionReceiptBytes: 64 * 1024 });
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const firstIncarnation = session.review_incarnation;
+    for (const batchId of ["bounded-one", "bounded-two"]) {
+      const result = await store.queuePrompts(session.key, {
+        batchId,
+        prompts: [{ prompt: batchId, tag: "feedback" }],
+      });
+      assert.equal(result.submission_receipt.duplicate, false);
+      feedbackResult(await store.takeFeedback(session.key));
+    }
+
+    const atCapacity = await store.queuePrompts(session.key, {
+      batchId: "bounded-three",
+      prompts: [{ prompt: "must remain uncommitted", tag: "feedback" }],
+    });
+    assert.equal(atCapacity.receipt_capacity, true);
+    assert.equal((await store.takeFeedback(session.key)).status, "waiting");
+    const storedAtCapacity = await store.findByKey(session.key);
+    assert.equal(storedAtCapacity.submission_receipts.length, 2);
+
+    await store.endSession(session.key, "user");
+    const reopened = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    assert.notEqual(reopened.review_incarnation, firstIncarnation);
+    assert.deepEqual(reopened.submission_receipts, []);
+    const afterReopen = await store.queuePrompts(reopened.key, {
+      batchId: "bounded-three",
+      prompts: [{ prompt: "new review payload", tag: "feedback" }],
+    });
+    assert.equal(afterReopen.submission_receipt.duplicate, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("submission receipt byte budget fails closed before feedback is committed", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const stateFile = path.join(dir, "state.json");
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<video></video>");
+
+    const store = new SessionStore(stateFile, { maxSubmissionReceipts: 10, maxSubmissionReceiptBytes: 1 });
+    const session = await store.upsertSession(artifact, "http://localhost:4387/session/test");
+    const rejected = await store.queuePrompts(session.key, {
+      batchId: "over-byte-budget",
+      prompts: [{ prompt: "Never partially commit me", tag: "feedback" }],
+    });
+    assert.equal(rejected.receipt_capacity, true);
+    assert.equal((await store.takeFeedback(session.key)).status, "waiting");
+    assert.deepEqual((await store.findByKey(session.key)).submission_receipts, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("queued text selection prompts preserve range anchors", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
   try {
@@ -462,17 +623,32 @@ test("queueing a warning produces one ordinary prompt and leaves the warning unr
     assert.equal(prepared.status, "open");
     assert.equal(prepared.selectable, true);
     assert.equal(queued.warnings.find((warning) => warning.id === second.id).status, "open");
-    await store.queuePrompts(session.key, { prompts: [{ ...queued.prompt, uid: "", tag: "layout-warnings" }] });
+    await store.queuePrompts(session.key, {
+      batchId: "layout-warning-first-tab",
+      prompts: [{ ...queued.prompt, uid: "", tag: "layout-warnings" }],
+    });
     const after = (await store.listLayoutWarnings(session.key)).warnings.find((warning) => warning.id === first.id);
     assert.equal(after.status, "queued");
     assert.equal(after.active, true);
     assert.equal(after.selectable, false);
     assert.equal(after.outstanding, true);
     const retry = await store.queuePrompts(session.key, {
+      batchId: "layout-warning-second-tab",
       prompts: [{ ...queued.prompt, uid: "", tag: "layout-warnings" }],
     });
     assert.equal(retry.conflict, undefined);
     assert.equal(retry.prompts.length, 1);
+    assert.equal(retry.submission_receipt.submitted_prompts, 1);
+    assert.equal(retry.submission_receipt.processed_prompts, 1);
+    assert.equal(retry.submission_receipt.accepted_prompts, 0);
+    assert.equal(retry.submission_receipt.duplicate, false);
+    const sameIdentity = await store.queuePrompts(session.key, {
+      batchId: "layout-warning-second-tab",
+      prompts: [{ ...queued.prompt, uid: "", tag: "layout-warnings" }],
+    });
+    assert.equal(sameIdentity.submission_receipt.processed_prompts, 1);
+    assert.equal(sameIdentity.submission_receipt.accepted_prompts, 0);
+    assert.equal(sameIdentity.submission_receipt.duplicate, true);
     const feedback = await store.takeFeedback(session.key);
     assert.equal(feedback.status, "feedback");
     assert.equal(feedback.prompts[0].tag, "layout-warnings");

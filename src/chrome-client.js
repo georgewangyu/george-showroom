@@ -4,18 +4,45 @@ const sessionDataElement = document.getElementById("lavish-session");
 const sessionData = JSON.parse(sessionDataElement?.textContent || "{}");
 const key = String(sessionData.key || "");
 const filePath = String(sessionData.file || "");
+const reviewIncarnation = String(sessionData.reviewIncarnation || "");
 const queueStorageKey = "lavish-axi:queued:" + key;
+const pendingBatchStorageKey = "lavish-axi:pending-batch:" + key;
 // Review-chrome state that must survive a browser refresh. Keyed per session so one review's
 // triage can never leak into another artifact's.
 const warningSelectionStorageKey = "lavish-axi:warning-selection:" + key;
 const warningAckStorageKey = "lavish-axi:warning-ack:" + key;
 const internalQueueKeyField = "_lavishQueueKey";
+const internalQueueItemIdField = "_lavishQueueItemId";
 const initialChat = Array.isArray(sessionData.initialChat) ? sessionData.initialChat : [];
 const MODE_TOGGLE_HOTKEY_KEY = String(sessionData.modeToggleHotkeyKey || "").toLowerCase();
+
+function normalizeQueueCount(value) {
+  const candidate = Number(value);
+  return Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : 0;
+}
 
 function isModeToggleHotkeyEvent(event) {
   if (event.shiftKey || event.altKey) return false;
   return Boolean(event.metaKey || event.ctrlKey) && String(event.key || "").toLowerCase() === MODE_TOGGLE_HOTKEY_KEY;
+}
+
+function mediaTransportActionForEvent(event) {
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.isComposing) return null;
+  const keyName = String(event.key || "").toLowerCase();
+  const isToggle = keyName === " " || keyName === "spacebar" || keyName === "k" || event.code === "Space";
+  if (isToggle) return event.repeat ? null : { type: "toggle" };
+  if (keyName === "j") return { type: "seek", seconds: -10 };
+  if (keyName === "l") return { type: "seek", seconds: 10 };
+  if (keyName === "arrowleft") return { type: "seek", seconds: -5 };
+  if (keyName === "arrowright") return { type: "seek", seconds: 5 };
+  return null;
+}
+
+function isMediaTransportBlocked(event) {
+  const selector =
+    "button,input,select,textarea,option,optgroup,label,summary,a[href],[contenteditable]:not([contenteditable='false']),[data-lavish-action],[role='button'],[role='link'],[role='checkbox'],[role='radio'],[role='switch'],[role='tab'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='slider'],[role='spinbutton'],[role='combobox'],[role='option'],[role='treeitem'],[tabindex]:not([tabindex='-1'])";
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
+  return path.some((target) => target?.closest?.(selector));
 }
 
 const frame = /** @type {HTMLIFrameElement} */ (document.getElementById("artifact"));
@@ -68,17 +95,26 @@ const warningsSelected = /** @type {HTMLSpanElement} */ (document.getElementById
 const warningsList = /** @type {HTMLDivElement} */ (document.getElementById("warningsList"));
 const warningsQueueButton = /** @type {HTMLButtonElement} */ (document.getElementById("warningsQueueButton"));
 const sendHint = /** @type {HTMLDivElement} */ (document.getElementById("sendHint"));
+const sendStatus = /** @type {HTMLDivElement} */ (document.getElementById("sendStatus"));
+const submissionRecovery = /** @type {HTMLDivElement} */ (document.getElementById("submissionRecovery"));
+const copyRetainedBatchButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyRetainedBatch"));
+const unlockRetainedBatchButton = /** @type {HTMLButtonElement} */ (document.getElementById("unlockRetainedBatch"));
 const whiteboardOverlay = /** @type {HTMLDivElement} */ (document.getElementById("whiteboardOverlay"));
 const whiteboardFrame = /** @type {HTMLIFrameElement} */ (document.getElementById("whiteboardFrame"));
 const whiteboardCloseButton = /** @type {HTMLButtonElement} */ (document.getElementById("whiteboardClose"));
 const whiteboardError = /** @type {HTMLDivElement} */ (document.getElementById("whiteboardError"));
 const artifactSrc = frame.dataset.artifactSrc || frame.getAttribute?.("data-artifact-src") || frame.src || "";
 
+let localQueueSequence = 0;
 const queued = loadQueuedPrompts();
-let annotation = true;
+let pendingSubmission = loadPendingSubmission();
+let annotation = sessionData.initialAnnotationMode !== false;
+const mediaTransportEnabled = sessionData.mediaTransportEnabled === true;
+let lastAcknowledgedSnapshot = "";
 let ended = false;
 let agentPresence = "waiting";
-let pendingSnapshot = "";
+let hostPendingPromptCount = normalizeQueueCount(sessionData.initialPendingPrompts);
+let submissionSnapshotPending = false;
 const layoutGateEnabled = sessionData.layoutGateEnabled !== false;
 const configuredLayoutGateMaxHoldMs = Number(sessionData.layoutGateMaxHoldMs);
 const layoutGateMaxHoldMs =
@@ -97,7 +133,10 @@ let layoutWarnings = Array.isArray(sessionData.initialLayoutWarnings) ? sessionD
 const selectedWarningIds = new Set(loadJsonState(warningSelectionStorageKey, []));
 let warningsDrawerOpen = false;
 let warningsAcknowledged = loadJsonState(warningAckStorageKey, false) === true;
+/** @type {{ action: "copy" | "submit", requestId: string, batchId: string, timer?: ReturnType<typeof setTimeout> }[]} */
 const snapshotRequests = [];
+let nextSnapshotRequestId = 0;
+const SNAPSHOT_REQUEST_TIMEOUT_MS = 2_000;
 let endAfterSubmit = false;
 let workingBubble = null;
 let submitQueuedPromise = null;
@@ -170,10 +209,74 @@ function saveJsonState(storageKey, value) {
 function loadQueuedPrompts() {
   try {
     const parsed = JSON.parse(sessionStorage.getItem(queueStorageKey) || "[]");
-    return Array.isArray(parsed) ? parsed.filter((prompt) => prompt && typeof prompt === "object") : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((prompt) => prompt && typeof prompt === "object").map(ensureLocalQueueItem)
+      : [];
   } catch {
     return [];
   }
+}
+
+function opaqueSubmissionId(prefix) {
+  const randomId = window.crypto?.randomUUID?.();
+  if (randomId) return prefix + "-" + randomId;
+  localQueueSequence += 1;
+  return (
+    prefix +
+    "-" +
+    Date.now().toString(36) +
+    "-" +
+    localQueueSequence.toString(36) +
+    "-" +
+    Math.random().toString(36).slice(2, 10)
+  );
+}
+
+function ensureLocalQueueItem(prompt) {
+  if (!prompt || typeof prompt !== "object") return prompt;
+  if (typeof prompt[internalQueueItemIdField] === "string" && prompt[internalQueueItemIdField]) return prompt;
+  return { ...prompt, [internalQueueItemIdField]: opaqueSubmissionId("item") };
+}
+
+function loadPendingSubmission() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(pendingBatchStorageKey) || "null");
+    if (!value || typeof value !== "object" || !Array.isArray(value.prompts)) return null;
+    if (!/^[A-Za-z0-9_-]{1,120}$/.test(String(value.id || ""))) return null;
+    const prompts = value.prompts.map(ensureLocalQueueItem);
+    return {
+      id: String(value.id),
+      prompts,
+      domSnapshot: String(value.domSnapshot || ""),
+      endSession: value.endSession === true,
+      // Legacy/unbound pending batches stay unbound and fail closed at the server; assigning the
+      // current incarnation here could replay an acknowledgement-lost batch into a new review.
+      reviewIncarnation: String(value.reviewIncarnation || ""),
+      timestampedNotes: prompts.filter(isTimestampedVideoPrompt).length,
+      messages: prompts.filter((prompt) => prompt?.tag === "message").length,
+      layoutWarnings: prompts.filter(isLayoutWarningPrompt).length,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistPendingSubmission() {
+  try {
+    if (pendingSubmission) sessionStorage.setItem(pendingBatchStorageKey, JSON.stringify(pendingSubmission));
+    else sessionStorage.removeItem(pendingBatchStorageKey);
+  } catch {
+    // The in-memory immutable batch still supports retry if browser storage is unavailable.
+  }
+}
+
+function recoverPendingSubmission() {
+  if (!pendingSubmission) return;
+  const queuedIds = new Set(queued.map((prompt) => prompt?.[internalQueueItemIdField]));
+  for (const prompt of pendingSubmission.prompts) {
+    if (!queuedIds.has(prompt[internalQueueItemIdField])) queued.push(prompt);
+  }
+  persistQueuedPrompts();
 }
 
 function persistQueuedPrompts() {
@@ -213,11 +316,15 @@ function render() {
     closeButton.addEventListener("click", (event) => removeQueuedPrompt(Number(closeButton.dataset.index), event));
   }
   updateSendState();
+  postQueueState();
   scrollPanelToBottom();
 }
 
 function updateSendState() {
-  sendButton.disabled = ended || agentPresence === "working";
+  // Presence is advisory. A missing or wrong-artifact poll must never prevent the human from
+  // durably queueing feedback for a later correct poll, and a stale "working" marker is not a
+  // safe reason to hold the session hostage. Only a completed session disables submission.
+  sendButton.disabled = ended;
   sendAndEndButton.disabled = sendButton.disabled;
   if (warningsQueueButton) updateWarningSelectionState();
 }
@@ -348,6 +455,18 @@ function scrollElementIntoView(el) {
 
 function removeQueuedPrompt(index, event) {
   if (event) event.stopPropagation();
+  const prompt = queued[index];
+  if (
+    pendingSubmission?.prompts.some(
+      (pending) => pending?.[internalQueueItemIdField] === prompt?.[internalQueueItemIdField],
+    )
+  ) {
+    setSubmissionStatus(
+      "submitting",
+      `Sending ${submissionSummary(pendingSubmission)} — this batch is already locked.`,
+    );
+    return;
+  }
   queued.splice(index, 1);
   persistQueuedPrompts();
   render();
@@ -359,6 +478,7 @@ function promptQueueKey(prompt) {
 
 function enqueuePrompt(prompt) {
   if (!prompt || typeof prompt !== "object") return;
+  prompt = ensureLocalQueueItem(prompt);
 
   const queueKey = promptQueueKey(prompt);
   if (queueKey) {
@@ -380,30 +500,183 @@ function stripInternalPromptFields(prompt) {
   if (!prompt || typeof prompt !== "object") return prompt;
   const clean = { ...prompt };
   delete clean[internalQueueKeyField];
+  delete clean[internalQueueItemIdField];
   return clean;
+}
+
+function isTimestampedVideoPrompt(prompt) {
+  return (
+    prompt?.target?.type === "video-timecode" &&
+    Object.hasOwn(prompt.target, "currentTime") &&
+    Number.isFinite(Number(prompt.target.currentTime))
+  );
+}
+
+function isLayoutWarningPrompt(prompt) {
+  return prompt?.tag === "layout-warnings" && prompt?.target?.type === "layout-warnings";
+}
+
+function submissionSummary(batch) {
+  const parts = [];
+  const timestampedNotes = normalizeQueueCount(batch?.timestampedNotes);
+  const messages = normalizeQueueCount(batch?.messages);
+  const total = Object.hasOwn(batch || {}, "acceptedPrompts")
+    ? normalizeQueueCount(batch.acceptedPrompts)
+    : batch?.prompts?.length || 0;
+  const annotations = Math.max(0, total - timestampedNotes - messages);
+  if (timestampedNotes) parts.push(`${timestampedNotes} timestamped ${timestampedNotes === 1 ? "note" : "notes"}`);
+  if (annotations) parts.push(`${annotations} ${annotations === 1 ? "annotation" : "annotations"}`);
+  if (messages) parts.push(`${messages} ${messages === 1 ? "message" : "messages"}`);
+  return parts.join(" + ") || "feedback";
+}
+
+function setSubmissionStatus(state, text) {
+  sendStatus.dataset.state = state;
+  sendStatus.textContent = text;
+  sendStatus.hidden = !text;
+  sendButton.setAttribute("aria-busy", String(state === "submitting"));
+  sendAndEndButton.setAttribute("aria-busy", String(state === "submitting"));
+}
+
+function hideSubmissionRecovery() {
+  submissionRecovery.hidden = true;
+}
+
+function showSubmissionRecovery() {
+  submissionRecovery.hidden = false;
+}
+
+function submissionPayload(batch) {
+  return {
+    prompts: batch.prompts.map(stripInternalPromptFields),
+    domSnapshot: batch.domSnapshot,
+    batchId: batch.id,
+    reviewIncarnation: batch.reviewIncarnation,
+    endSession: batch.endSession === true,
+  };
+}
+
+function retainedSubmissionText(batch) {
+  return JSON.stringify(submissionPayload(batch), null, 2);
+}
+
+copyRetainedBatchButton.onclick = async () => {
+  if (!pendingSubmission) return;
+  await copyText(retainedSubmissionText(pendingSubmission));
+  setSubmissionStatus(
+    "error",
+    "Copied the exact retained feedback. The original batch remains locked and unacknowledged; its prior delivery state is unknown.",
+  );
+};
+
+unlockRetainedBatchButton.onclick = () => {
+  if (!pendingSubmission) return;
+  pendingSubmission = null;
+  endAfterSubmit = false;
+  persistPendingSubmission();
+  hideSubmissionRecovery();
+  render();
+  setSubmissionStatus(
+    "error",
+    "Retained feedback unlocked. Review it before sending as a new batch; it may duplicate feedback already delivered in a previous review.",
+  );
+};
+
+function createPendingSubmission(prompts, domSnapshot, endSession) {
+  return {
+    id: opaqueSubmissionId("batch"),
+    prompts: prompts.slice(),
+    domSnapshot: String(domSnapshot || ""),
+    endSession: endSession === true,
+    reviewIncarnation,
+    timestampedNotes: prompts.filter(isTimestampedVideoPrompt).length,
+    messages: prompts.filter((prompt) => prompt?.tag === "message").length,
+    layoutWarnings: prompts.filter(isLayoutWarningPrompt).length,
+  };
 }
 
 function postToFrame(message) {
   if (frame.contentWindow) frame.contentWindow.postMessage(message, "*");
 }
 
+function postQueueState() {
+  postToFrame({ type: "lavish:queueState", count: hostPendingPromptCount });
+}
+
+function setHostQueueState(value) {
+  hostPendingPromptCount = normalizeQueueCount(value?.count);
+  postQueueState();
+}
+
 function requestSnapshot(action) {
-  snapshotRequests.push(action);
-  postToFrame({ type: "lavish:requestSnapshot" });
+  const requestId = `snapshot-${++nextSnapshotRequestId}`;
+  const request = {
+    action,
+    requestId,
+    batchId: action === "submit" ? String(pendingSubmission?.id || "") : "",
+  };
+  snapshotRequests.push(request);
+  if (action === "submit") {
+    request.timer = setTimeout(() => {
+      const index = snapshotRequests.findIndex((candidate) => candidate.requestId === requestId);
+      if (index >= 0) snapshotRequests.splice(index, 1);
+      if (!submissionSnapshotPending || !pendingSubmission || pendingSubmission.id !== request.batchId) return;
+      // The snapshot is review context, not part of prompt identity. Never let a silent or
+      // reloading artifact keep an already-frozen local batch from reaching durable storage.
+      pendingSubmission = { ...pendingSubmission, domSnapshot: lastAcknowledgedSnapshot };
+      persistPendingSubmission();
+      submissionSnapshotPending = false;
+      setSubmissionStatus(
+        "submitting",
+        `Artifact snapshot unavailable; sending ${submissionSummary(pendingSubmission)}…`,
+      );
+      void submitQueued();
+    }, SNAPSHOT_REQUEST_TIMEOUT_MS);
+  }
+  postToFrame({ type: "lavish:requestSnapshot", requestId });
 }
 
 function sendQueued(endAfter) {
-  if (ended || agentPresence === "working") return;
+  if (ended) return;
   closeMenus();
 
   const text = chatInput.value.trim();
   if (text) {
-    queued.push({ uid: "", prompt: text, selector: "", tag: "message", text: "Freeform message" });
+    queued.push(
+      ensureLocalQueueItem({ uid: "", prompt: text, selector: "", tag: "message", text: "Freeform message" }),
+    );
     persistQueuedPrompts();
-    addChat("user", text);
     chatInput.value = "";
     render();
   }
+
+  if (pendingSubmission) {
+    const pendingItemIds = new Set(pendingSubmission.prompts.map((prompt) => prompt?.[internalQueueItemIdField]));
+    const hasQueuedFollowup = queued.some((prompt) => !pendingItemIds.has(prompt?.[internalQueueItemIdField]));
+    if (hasQueuedFollowup) {
+      submitQueuedAgain = true;
+      if (submissionSnapshotPending && pendingSubmission.endSession) {
+        pendingSubmission = { ...pendingSubmission, endSession: false };
+        persistPendingSubmission();
+      }
+    }
+    if (endAfter) {
+      endAfterSubmit = true;
+      if (submissionSnapshotPending && !hasQueuedFollowup) {
+        pendingSubmission = { ...pendingSubmission, endSession: true };
+        persistPendingSubmission();
+      } else if (!pendingSubmission.endSession) {
+        // This batch may already be committed with endSession=false and only lack its response,
+        // so never mutate its payload-bound identity. Retry it unchanged, then serialize a new
+        // ending batch after its exact acknowledgement.
+        submitQueuedAgain = true;
+      }
+    }
+    hideSendHint();
+    if (!submissionSnapshotPending) void submitQueued();
+    return;
+  }
+
   if (!queued.length) {
     showSendHint();
     return;
@@ -411,6 +684,13 @@ function sendQueued(endAfter) {
   hideSendHint();
 
   if (endAfter) endAfterSubmit = true;
+  // Freeze the complete prompt/message identity set synchronously with the user's click.
+  // The iframe snapshot is useful context, but waiting for it must not create a window in
+  // which later queue edits silently enter or leave this submission transaction.
+  pendingSubmission = createPendingSubmission(queued.slice(), "", endAfterSubmit);
+  persistPendingSubmission();
+  submissionSnapshotPending = true;
+  setSubmissionStatus("submitting", `Sending ${submissionSummary(pendingSubmission)}…`);
   requestSnapshot("submit");
 }
 
@@ -426,28 +706,39 @@ async function submitQueued() {
     const result = await submitQueuedPromise;
     succeeded = result !== false;
     return result;
+  } catch {
+    const summary = submissionSummary(pendingSubmission);
+    setSubmissionStatus(
+      "error",
+      `Send not acknowledged. ${summary} retained — choose Send to Agent to retry the complete batch.`,
+    );
+    return false;
   } finally {
     submitQueuedPromise = null;
     const shouldSubmitAgain = submitQueuedAgain;
     submitQueuedAgain = false;
     if (!succeeded) {
       endAfterSubmit = false;
-    } else if (!ended && shouldSubmitAgain) {
-      if (queued.length) {
-        submitQueued();
-      } else if (endAfterSubmit) {
-        endAfterSubmit = false;
-        endSession();
+    } else if (!ended && shouldSubmitAgain && (queued.length || endAfterSubmit)) {
+      // A Send & End requested during another submit still goes through /prompts. Even when the
+      // earlier submit drained the prompt array, this keeps the end intent on the same durable,
+      // serialized session-store path instead of opening a separate /end interruption window.
+      if (!pendingSubmission) {
+        pendingSubmission = createPendingSubmission(queued.slice(), lastAcknowledgedSnapshot, endAfterSubmit);
+        persistPendingSubmission();
       }
+      void submitQueued();
     }
   }
 }
 
 async function submitQueuedOnce() {
-  const prompts = queued.slice();
-  const shouldEndSession = endAfterSubmit;
-  const body = { prompts: prompts.map(stripInternalPromptFields), domSnapshot: pendingSnapshot };
-  if (shouldEndSession) body.endSession = true;
+  if (!pendingSubmission) return false;
+  const batch = pendingSubmission;
+  const shouldEndSession = batch.endSession;
+  hideSubmissionRecovery();
+  setSubmissionStatus("submitting", `Sending ${submissionSummary(batch)}…`);
+  const body = submissionPayload(batch);
   const response = await fetch("/api/" + key + "/prompts", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -456,18 +747,90 @@ async function submitQueuedOnce() {
   if (!response.ok) {
     if (response.status === 409) {
       const data = await response.json().catch(() => null);
+      if (data?.status === "batch-id-reused") {
+        // A collision means this payload was not committed. Give the intact frozen batch a fresh
+        // identity so the next user retry can proceed without ever accepting the unrelated receipt.
+        pendingSubmission = { ...batch, id: opaqueSubmissionId("batch") };
+        persistPendingSubmission();
+        throw new Error("submission batch identity conflicted with an earlier payload");
+      }
+      if (data?.status === "stale-review-incarnation") {
+        setSubmissionStatus(
+          "error",
+          `This unacknowledged ${submissionSummary(batch)} belongs to the previous review and remains retained; it cannot be safely resent in this new review.`,
+        );
+        showSubmissionRecovery();
+        return false;
+      }
       if (Array.isArray(data?.warnings)) setLayoutWarnings(data.warnings);
+      pendingSubmission = null;
+      persistPendingSubmission();
+      setSubmissionStatus("error", "Some layout warnings changed. Review them, then send the retained feedback again.");
       endAfterSubmit = false;
+      return false;
+    }
+    if (response.status === 507) {
+      const data = await response.json().catch(() => null);
+      setSubmissionStatus(
+        "error",
+        `${data?.error || "This review reached its durable retry-receipt budget."} The complete batch remains retained. Copy it now, or explicitly end and reopen the review before choosing Unlock for requeue.`,
+      );
+      showSubmissionRecovery();
       return false;
     }
     throw new Error("failed to submit queued prompts");
   }
-  for (const prompt of prompts) {
-    const index = queued.indexOf(prompt);
+  const acknowledgement = typeof response.json === "function" ? await response.json() : null;
+  const receiptIsComplete =
+    acknowledgement &&
+    typeof acknowledgement === "object" &&
+    acknowledgement.status === "queued" &&
+    acknowledgement.batch_id === batch.id &&
+    acknowledgement.review_incarnation === batch.reviewIncarnation &&
+    typeof acknowledgement.duplicate === "boolean" &&
+    Number.isSafeInteger(acknowledgement.submitted_prompts) &&
+    acknowledgement.submitted_prompts === batch.prompts.length &&
+    Number.isSafeInteger(acknowledgement.processed_prompts) &&
+    acknowledgement.processed_prompts === acknowledgement.submitted_prompts &&
+    Number.isSafeInteger(acknowledgement.submitted_timestamped_notes) &&
+    acknowledgement.submitted_timestamped_notes === batch.timestampedNotes &&
+    Number.isSafeInteger(acknowledgement.submitted_messages) &&
+    acknowledgement.submitted_messages === batch.messages &&
+    Number.isSafeInteger(acknowledgement.submitted_layout_warnings) &&
+    acknowledgement.submitted_layout_warnings === batch.layoutWarnings &&
+    Number.isSafeInteger(acknowledgement.deduplicated_layout_warnings) &&
+    acknowledgement.deduplicated_layout_warnings >= 0 &&
+    acknowledgement.deduplicated_layout_warnings <= acknowledgement.submitted_layout_warnings &&
+    Number.isSafeInteger(acknowledgement.accepted_prompts) &&
+    acknowledgement.accepted_prompts ===
+      acknowledgement.processed_prompts - acknowledgement.deduplicated_layout_warnings &&
+    Number.isSafeInteger(acknowledgement.timestamped_notes) &&
+    acknowledgement.timestamped_notes === acknowledgement.submitted_timestamped_notes &&
+    Number.isSafeInteger(acknowledgement.messages) &&
+    acknowledgement.messages === acknowledgement.submitted_messages &&
+    acknowledgement.accepted_prompts >= acknowledgement.timestamped_notes + acknowledgement.messages;
+  if (!receiptIsComplete) throw new Error("submission acknowledgement did not prove the complete pending batch");
+  const acknowledgedBatch = {
+    ...batch,
+    acceptedPrompts: acknowledgement.accepted_prompts,
+    timestampedNotes: acknowledgement.timestamped_notes,
+    messages: acknowledgement.messages,
+  };
+  for (const prompt of batch.prompts) {
+    const itemId = prompt?.[internalQueueItemIdField];
+    const index = queued.findIndex((candidate) => candidate?.[internalQueueItemIdField] === itemId);
     if (index !== -1) queued.splice(index, 1);
   }
+  for (const prompt of batch.prompts) {
+    if (prompt?.tag === "message" && prompt.prompt) addChat("user", prompt.prompt);
+  }
+  lastAcknowledgedSnapshot = batch.domSnapshot;
+  pendingSubmission = null;
+  hideSubmissionRecovery();
+  persistPendingSubmission();
   persistQueuedPrompts();
   render();
+  setSubmissionStatus("success", `Sent ${submissionSummary(acknowledgedBatch)}.`);
   if (shouldEndSession) {
     endAfterSubmit = false;
     markSessionEnded();
@@ -834,7 +1197,7 @@ function updateWarningSelectionState() {
   warningsSelectAll.checked = selectable.length > 0 && selectedCount === selectable.length;
   warningsSelectAll.indeterminate = selectedCount > 0 && selectedCount < selectable.length;
   warningsSelected.textContent = selectedCount === 0 ? "None selected" : selectedCount + " selected";
-  warningsQueueButton.disabled = selectedCount === 0 || ended || agentPresence === "working";
+  warningsQueueButton.disabled = selectedCount === 0 || ended;
 }
 
 function toggleSelectAllWarnings() {
@@ -894,7 +1257,7 @@ async function dismissWarning(id) {
 // One queued batch = one ordinary queued prompt. The CLI cannot tell it apart from any other
 // feedback, which is exactly the point: no parallel agent protocol.
 async function queueSelectedWarningFixes() {
-  if (ended || agentPresence === "working") return;
+  if (ended) return;
   const ids = [...selectedWarningIds];
   if (ids.length === 0) return;
   warningsQueueButton.disabled = true;
@@ -1222,6 +1585,7 @@ let overlayFrameReady = false;
 let overlayChannelId = "";
 let overlayOpeningIndex = null;
 let nextWhiteboardFlushId = 0;
+const WHITEBOARD_TEARDOWN_TIMEOUT_MS = 1500;
 let artifactResetPromise = null;
 let chromeRestartReloadPromise = null;
 const whiteboardTeardowns = new Map();
@@ -1347,12 +1711,22 @@ function beginWhiteboardTeardown(index, placement, onComplete) {
     return pending.promise;
   }
   const flushId = `whiteboard-${++nextWhiteboardFlushId}`;
-  let resolve;
+  /** @type {(value: boolean) => void} */
+  let resolve = () => {};
   const promise = new Promise((complete) => {
     resolve = complete;
   });
-  const teardown = { index, placement, flushId, promise, resolve, onComplete };
+  const teardown = { index, placement, flushId, promise, resolve, onComplete, timeout: null };
   whiteboardTeardowns.set(key, teardown);
+  teardown.timeout = setTimeout(() => {
+    if (whiteboardTeardowns.get(key) !== teardown) return;
+    whiteboardTeardowns.delete(key);
+    teardown.onComplete?.(false);
+    teardown.resolve(false);
+    showWhiteboardError(
+      "The whiteboard save did not finish in time. Your current board is still open; close this message and retry the action.",
+    );
+  }, WHITEBOARD_TEARDOWN_TIMEOUT_MS);
   const message = { type: "lavish-whiteboard:prepareTeardown", flushId };
   postToWhiteboard(index, placement, message);
   return promise;
@@ -1364,6 +1738,7 @@ function finishWhiteboardTeardown(index, message, placement) {
   const teardown = whiteboardTeardowns.get(key);
   if (!teardown || teardown.index !== index || teardown.placement !== placement || teardown.flushId !== flushId) return;
   whiteboardTeardowns.delete(key);
+  clearTimeout(teardown.timeout);
   teardown.onComplete?.(true);
   teardown.resolve(true);
 }
@@ -1374,8 +1749,12 @@ function failWhiteboardTeardown(index, message, placement) {
   const teardown = whiteboardTeardowns.get(key);
   if (!teardown || teardown.index !== index || teardown.placement !== placement || teardown.flushId !== flushId) return;
   whiteboardTeardowns.delete(key);
+  clearTimeout(teardown.timeout);
   teardown.onComplete?.(false);
   teardown.resolve(false);
+  showWhiteboardError(
+    "The whiteboard could not confirm its save. Your current board is still open; close this message and retry the action.",
+  );
 }
 
 function whiteboardFlushKey(index, placement) {
@@ -1442,7 +1821,14 @@ function openWhiteboardOverlay(index) {
 
 function closeWhiteboard() {
   const index = overlayIndex;
-  if (index === null) return;
+  if (index === null) {
+    if (!whiteboardError.hidden) {
+      whiteboardOverlay.hidden = true;
+      whiteboardError.hidden = true;
+      whiteboardFrame.src = "about:blank";
+    }
+    return;
+  }
   if (!overlayFrameReady) {
     finishWhiteboardClose(index);
     return;
@@ -1744,12 +2130,23 @@ window.addEventListener("message", (event) => {
     enqueuePrompt(msg.prompt);
   }
   if (msg.type === "lavish:snapshot") {
-    const snapshotAction = snapshotRequests.shift() || "submit";
-    if (snapshotAction === "copy") {
+    const responseRequestId = String(msg.requestId || "");
+    const snapshotIndex = responseRequestId
+      ? snapshotRequests.findIndex((request) => request.requestId === responseRequestId)
+      : snapshotRequests.length === 1
+        ? 0
+        : -1;
+    if (snapshotIndex < 0) return;
+    const [snapshotRequest] = snapshotRequests.splice(snapshotIndex, 1);
+    if (snapshotRequest.timer) clearTimeout(snapshotRequest.timer);
+    if (snapshotRequest.action === "copy") {
       copyText(msg.snapshot || "");
     } else {
-      pendingSnapshot = msg.snapshot || "";
-      submitQueued();
+      if (!submissionSnapshotPending || !pendingSubmission || pendingSubmission.id !== snapshotRequest.batchId) return;
+      pendingSubmission = { ...pendingSubmission, domSnapshot: String(msg.snapshot || "") };
+      persistPendingSubmission();
+      submissionSnapshotPending = false;
+      void submitQueued();
     }
   }
   if (msg.type === "lavish:scroll") {
@@ -1765,6 +2162,10 @@ window.addEventListener("message", (event) => {
     ).catch(() => {});
   }
   if (msg.type === "lavish:sendQueuedPrompts") sendQueued();
+  if (msg.type === "lavish:sendAndEnd") {
+    if (pendingSubmission || queued.length || chatInput.value.trim()) sendQueued(true);
+    else void endSession();
+  }
   if (msg.type === "lavish:endSession") endSession();
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();
 });
@@ -1778,6 +2179,7 @@ function toggleAnnotationMode() {
   postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation });
 }
 
+if (!annotation) annotationSwitch.setAttribute("aria-pressed", "false");
 annotationSwitch.onclick = toggleAnnotationMode;
 
 sendButton.onclick = () => sendQueued(false);
@@ -1850,9 +2252,28 @@ document.addEventListener(
   },
   true,
 );
+document.addEventListener(
+  "keydown",
+  (event) => {
+    if (
+      !mediaTransportEnabled ||
+      ended ||
+      !whiteboardOverlay.hidden ||
+      !shareDialog.hidden ||
+      isMediaTransportBlocked(event)
+    )
+      return;
+    const action = mediaTransportActionForEvent(event);
+    if (!action) return;
+    event.preventDefault();
+    postToFrame({ type: "lavish:mediaTransport", action });
+  },
+  true,
+);
 frame.addEventListener("load", () => {
   if (artifactSpokeToken !== artifactLoadToken) armArtifactAvailabilityProbe(artifactLoadToken);
   postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation && !ended });
+  postQueueState();
   // Replay the pre-reload scroll position so hot reloads don't jump the artifact to the top.
   postToFrame({ type: "lavish:restoreScroll", x: lastScroll.x, y: lastScroll.y });
   if (lastReviewState) postToFrame({ type: "lavish:restoreReviewState", state: lastReviewState });
@@ -1874,11 +2295,19 @@ events.addEventListener("chrome-reload", () => reloadAfterServerRestart());
 events.addEventListener("agent-reply", (event) => addChat("agent", JSON.parse(event.data).text));
 events.addEventListener("chat-sync", (event) => syncChat(JSON.parse(event.data).chat || []));
 events.addEventListener("agent-presence", (event) => setAgentPresence(JSON.parse(event.data).state));
+events.addEventListener("queue-state", (event) => setHostQueueState(JSON.parse(event.data)));
 events.addEventListener("layout-warnings", (event) => setLayoutWarnings(JSON.parse(event.data).warnings || []));
 // A reconnecting stream means this chrome may have missed updates while it was away.
 events.addEventListener("open", () => refreshLayoutWarnings());
 
+recoverPendingSubmission();
 render();
+if (pendingSubmission) {
+  setSubmissionStatus(
+    "error",
+    `Previous send was not acknowledged. ${submissionSummary(pendingSubmission)} retained — choose Send to Agent to retry.`,
+  );
+}
 setWarningsDrawerOpen(false);
 renderWarnings();
 initialChat.forEach((item) => addChat(item.role, item.text));

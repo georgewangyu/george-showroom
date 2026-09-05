@@ -93,7 +93,8 @@ test("review controls queue exact gate and branch targets without inventing nati
   assert.match(script, /queuePrompt/);
   assert.match(script, /gate_id/);
   assert.match(script, /queueKey/);
-  assert.match(script, /window\.lavish\.endSession/);
+  assert.match(script, /window\.lavish\.sendAndEnd/);
+  assert.doesNotMatch(script, /window\.lavish\.endSession/);
   assert.doesNotMatch(script, /currentTime/);
 });
 

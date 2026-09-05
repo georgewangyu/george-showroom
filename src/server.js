@@ -1,24 +1,29 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import chokidar from "chokidar";
 import express from "express";
+import { Parser } from "parse5";
 
 import {
+  applyMediaTransport,
   classifySevereTextOverflow,
   classifyMaterialRectEscape,
   createArtifactSdk,
   deriveLavishQueueKey,
   findStableLayoutFindings,
   isMaterialPageOverflow,
+  isMediaTransportBlockedEvent,
+  isMediaTransportBlockedTarget,
   isModeToggleHotkeyEvent,
   isNativeInteractiveControl,
   isNearTotalOcclusion,
+  mediaTransportActionForEvent,
   MODE_TOGGLE_HOTKEY_KEY,
 } from "./artifact-sdk.js";
 import {
@@ -232,7 +237,7 @@ export async function serve({
       logEvent?.(`session opened key=${key} file=${file}`);
       await syncOutstandingRepairs(key);
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
-      res.json({ key, file, url, status: "opened" });
+      res.json({ key, file, url, status: "opened", review_incarnation: session.review_incarnation });
     } catch (error) {
       next(error);
     }
@@ -246,7 +251,10 @@ export async function serve({
         req.query.timeoutMs === undefined ? null : Math.max(0, Math.min(Number(req.query.timeoutMs || 0), 2147483647));
       const immediate = await store.takeFeedback(key);
       if (immediate.status !== "waiting") {
-        if (immediate.status === "feedback") markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+        if (immediate.status === "feedback") {
+          events.emit("queue-state", key, 0);
+          markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+        }
         res.json(immediate);
         return;
       }
@@ -280,7 +288,10 @@ export async function serve({
         responding = true;
         try {
           const result = await store.takeFeedback(key);
-          if (result.status === "feedback") markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+          if (result.status === "feedback") {
+            events.emit("queue-state", key, 0);
+            markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+          }
           if (streamHeartbeat) {
             res.end(JSON.stringify(result));
           } else {
@@ -318,9 +329,31 @@ export async function serve({
       const hasLayoutWarningPrompt = Array.isArray(req.body?.prompts)
         ? req.body.prompts.some((prompt) => prompt?.tag === "layout-warnings")
         : false;
-      const session = await store.queuePrompts(req.params.key, req.body || {});
+      const session = await store.queuePrompts(req.params.key, req.body || {}, { requireReviewIncarnation: true });
       if (!session) {
         res.status(404).json({ error: "session not found" });
+        return;
+      }
+      if (session.submission_conflict) {
+        res.status(409).json({
+          status: session.conflict_type || "batch-id-conflict",
+          error: "submission batch identity was already used for different content",
+        });
+        return;
+      }
+      if (session.stale_review_incarnation) {
+        res.status(409).json({
+          status: "stale-review-incarnation",
+          error: "submission belongs to an earlier review incarnation and was not committed",
+          review_incarnation: session.review_incarnation,
+        });
+        return;
+      }
+      if (session.receipt_capacity) {
+        res.status(507).json({
+          status: "receipt-capacity",
+          error: "this review reached its durable retry-receipt budget; reopen it to start a new review",
+        });
         return;
       }
       if (session.conflict) {
@@ -333,13 +366,41 @@ export async function serve({
         return;
       }
       if (shouldEndSession) clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
+      // Publish the count immediately after the atomic queue commit. Layout-repair bookkeeping
+      // below is best effort and may yield long enough for a concurrent poll to drain the queue;
+      // emitting the captured positive count after that await would overwrite the later zero.
+      events.emit("queue-state", req.params.key, session.pending_prompts);
       if (hasLayoutWarningPrompt) {
         await syncOutstandingRepairs(req.params.key);
         events.emit("layout-warnings", req.params.key, serializeLayoutWarnings(session.layout_warnings));
       }
-      events.emit(shouldEndSession ? "ended" : "feedback", req.params.key);
-      res.json({ status: "queued", pending_prompts: session.pending_prompts });
-      if (shouldEndSession) await shutdownIfNoLiveSessions();
+      const receipt = session.submission_receipt || {};
+      res.once("finish", () => {
+        if (!receipt.duplicate || session.pending_prompts > 0) {
+          events.emit(shouldEndSession ? "ended" : "feedback", req.params.key);
+        }
+        if (shouldEndSession) void shutdownIfNoLiveSessions();
+      });
+      res.json({
+        status: "queued",
+        pending_prompts: session.pending_prompts,
+        ...(receipt.batch_id
+          ? {
+              batch_id: receipt.batch_id,
+              duplicate: receipt.duplicate === true,
+              submitted_prompts: receipt.submitted_prompts,
+              processed_prompts: receipt.processed_prompts,
+              submitted_timestamped_notes: receipt.submitted_timestamped_notes,
+              submitted_messages: receipt.submitted_messages,
+              submitted_layout_warnings: receipt.submitted_layout_warnings,
+              accepted_prompts: receipt.accepted_prompts,
+              timestamped_notes: receipt.timestamped_notes,
+              messages: receipt.messages,
+              deduplicated_layout_warnings: receipt.deduplicated_layout_warnings,
+              review_incarnation: receipt.review_incarnation,
+            }
+          : {}),
+      });
     } catch (error) {
       next(error);
     }
@@ -564,11 +625,13 @@ export async function serve({
       const session = chromeLoad.session;
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
       const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
-      const { faviconTag, title } = extractArtifactHead(artifactHtml);
+      const { annotationMode, faviconTag, mediaTransportEnabled, title } = extractArtifactHead(artifactHtml);
       res.type("html").send(
         createChromeHtml(session, {
           layoutGateEnabled: shouldEnableLayoutGate(req.query || {}),
           faviconTag,
+          initialAnnotationMode: annotationMode,
+          mediaTransportEnabled,
           title: title ? `${title} · George Showroom` : "George Showroom",
           artifactRevision: chromeLoad.artifact_revision,
           artifactLoadToken: chromeLoad.artifact_load_token,
@@ -679,7 +742,12 @@ export async function serve({
         res.status(403).send("Forbidden");
         return;
       }
-      res.sendFile(file, { dotfiles: "allow" });
+      const confinedFile = await resolveExistingArtifactAsset(root, file);
+      if (!confinedFile) {
+        res.status(403).send("Forbidden");
+        return;
+      }
+      res.sendFile(confinedFile, { dotfiles: "allow" });
     } catch (error) {
       next(error);
     }
@@ -710,6 +778,11 @@ export async function serve({
           res.write(`event: agent-presence\ndata: ${JSON.stringify({ state })}\n\n`);
         }
       };
+      const sendQueueState = (key, count) => {
+        if (key === req.params.key) {
+          res.write(`event: queue-state\ndata: ${JSON.stringify({ count })}\n\n`);
+        }
+      };
       // Warning-inbox state lives on the server, so every attached chrome - including one that
       // just reconnected after a browser refresh - converges on the same list.
       const sendLayoutWarnings = (key, warnings) => {
@@ -721,15 +794,18 @@ export async function serve({
       res.write(
         `event: agent-presence\ndata: ${JSON.stringify({ state: computePresence(req.params.key, activePolls, deliveredFeedback) })}\n\n`,
       );
+      res.write(`event: queue-state\ndata: ${JSON.stringify({ count: session?.pending_prompts || 0 })}\n\n`);
       events.on("reload", sendReload);
       events.on("agent-reply", sendAgentReply);
       events.on("agent-presence", sendPresence);
+      events.on("queue-state", sendQueueState);
       events.on("layout-warnings", sendLayoutWarnings);
       req.on("close", () => {
         sseClients.delete(res);
         events.off("reload", sendReload);
         events.off("agent-reply", sendAgentReply);
         events.off("agent-presence", sendPresence);
+        events.off("queue-state", sendQueueState);
         events.off("layout-warnings", sendLayoutWarnings);
         refreshIdleTimer();
       });
@@ -1217,6 +1293,17 @@ export function resolveArtifactAsset(root, assetPath) {
   return file;
 }
 
+async function resolveExistingArtifactAsset(root, file) {
+  try {
+    const [realRoot, realFile] = await Promise.all([realpath(root), realpath(file)]);
+    const relative = path.relative(realRoot, realFile);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+    return realFile;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * @param {(key: string) => number} reloadDebounceMs
  */
@@ -1417,22 +1504,90 @@ function normalizeFlagValue(value) {
 const LAVISH_DEFAULT_FAVICON =
   "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>\u{1F48E}</text></svg>\">";
 
-function readTagAttr(tag, name) {
-  // Tokenize real attributes rather than searching for the bare name anywhere in
-  // the tag: a `\b`-anchored name matches attribute-name suffixes (e.g. `href`
-  // inside `data-href`) and names that appear inside another attribute's quoted
-  // value (e.g. `href=` inside a `title="... href=x"`), both of which would make
-  // us adopt the wrong href. Walking whole `name="value"` pairs consumes each
-  // value as one unit, so only genuine attribute names are matched.
-  const attrRe = /([a-z][\w:-]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi;
-  const target = name.toLowerCase();
-  let match;
-  while ((match = attrRe.exec(tag)) !== null) {
-    if (match[1].toLowerCase() === target) {
-      return (match[3] ?? match[4] ?? match[5] ?? "").trim();
-    }
+function parsedAttribute(node, name) {
+  if (!Array.isArray(node?.attrs)) return "";
+  const attribute = node.attrs.find((candidate) => String(candidate?.name || "").toLowerCase() === name);
+  return String(attribute?.value || "").trim();
+}
+
+function parsedTextContent(node) {
+  if (node?.nodeName === "#text") return String(node.value || "");
+  return Array.isArray(node?.childNodes) ? node.childNodes.map(parsedTextContent).join("") : "";
+}
+
+const MAX_ARTIFACT_HEAD_PARSE_CHARS = 1024 * 1024;
+const MAX_ARTIFACT_HEAD_NODES = 4096;
+const MAX_ARTIFACT_HEAD_DEPTH = 128;
+const ARTIFACT_HEAD_PARSE_CHUNK_CHARS = 4096;
+
+class ArtifactHeadParser extends Parser {
+  constructor() {
+    super();
+    this.complete = false;
+    this.limited = false;
+    this.elementCount = 0;
   }
-  return "";
+
+  stopHeadParse(complete) {
+    this.complete = complete;
+    this.tokenizer.pause();
+  }
+
+  /** @param {import("parse5").Token.TagToken} token */
+  onStartTag(token) {
+    this.elementCount += 1;
+    if (this.elementCount > MAX_ARTIFACT_HEAD_NODES) {
+      this.limited = true;
+      this.stopHeadParse(false);
+      return;
+    }
+    super.onStartTag(token);
+    if (this.openElements.stackTop > MAX_ARTIFACT_HEAD_DEPTH) {
+      this.limited = true;
+      this.stopHeadParse(false);
+      return;
+    }
+
+    const html = this.document.childNodes.find((node) => node?.tagName === "html");
+    const outsideHead = html?.childNodes?.some((node) => Boolean(node?.tagName) && node !== this.headElement);
+    if (this.headElement && outsideHead) this.stopHeadParse(true);
+  }
+
+  /** @param {import("parse5").Token.TagToken} token */
+  onEndTag(token) {
+    super.onEndTag(token);
+    if (token.tagName === "head") this.stopHeadParse(true);
+  }
+
+  /** @param {import("parse5").Token.EOFToken} token */
+  onEof(token) {
+    super.onEof(token);
+    this.complete = true;
+  }
+}
+
+export function parseArtifactHeadBounded(html) {
+  const source = String(html || "");
+  const parser = new ArtifactHeadParser();
+  const parseLimit = Math.min(source.length, MAX_ARTIFACT_HEAD_PARSE_CHARS);
+  for (
+    let offset = 0;
+    offset < parseLimit && !parser.complete && !parser.limited;
+    offset += ARTIFACT_HEAD_PARSE_CHUNK_CHARS
+  ) {
+    const end = Math.min(parseLimit, offset + ARTIFACT_HEAD_PARSE_CHUNK_CHARS);
+    parser.tokenizer.write(source.slice(offset, end), end === source.length);
+  }
+  if (!parser.complete && !parser.limited) {
+    parser.limited = source.length > parseLimit;
+    if (parser.limited) parser.tokenizer.pause();
+  }
+  return {
+    complete: parser.complete,
+    consumedChars: Math.max(0, parser.tokenizer.preprocessor.offset),
+    head: parser.complete && !parser.limited ? parser.headElement : null,
+    limited: parser.limited,
+  };
 }
 
 // Pull a tab favicon + title out of the artifact's own <head>. George Showroom renders the
@@ -1443,19 +1598,34 @@ function readTagAttr(tag, name) {
 // artifact-relative hrefs would not resolve against the chrome page, so they fall
 // back to the default.
 export function extractArtifactHead(html) {
-  const head = String(html || "").slice(0, 10000);
+  const parsedHead = parseArtifactHeadBounded(html).head;
+  const headElements = Array.isArray(parsedHead?.childNodes)
+    ? parsedHead.childNodes.filter((node) => Boolean(node?.tagName))
+    : [];
   let faviconTag = LAVISH_DEFAULT_FAVICON;
-  const linkTags = head.match(/<link\b(?:"[^"]*"|'[^']*'|[^"'>])*>/gi) || [];
-  const iconTag = linkTags.find((tag) => /(^|\s)icon(\s|$)/i.test(readTagAttr(tag, "rel")));
-  const iconHref = iconTag ? readTagAttr(iconTag, "href") : "";
+  const iconTag = headElements.find(
+    (node) =>
+      String(node.tagName).toLowerCase() === "link" &&
+      parsedAttribute(node, "rel").toLowerCase().split(/\s+/).includes("icon"),
+  );
+  const iconHref = iconTag ? parsedAttribute(iconTag, "href") : "";
   if (iconHref && /^(data:|https?:|\/\/)/i.test(iconHref)) {
     const safeHref = iconHref.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
     faviconTag = `<link rel="icon" href="${safeHref}">`;
   }
-  let title = "";
-  const titleMatch = head.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  if (titleMatch) title = titleMatch[1].replace(/\s+/g, " ").trim();
-  return { faviconTag, title };
+  const titleTag = headElements.find((node) => String(node.tagName).toLowerCase() === "title");
+  const title = titleTag ? parsedTextContent(titleTag).replace(/\s+/g, " ").trim() : "";
+  const metaTags = headElements.filter((node) => String(node.tagName).toLowerCase() === "meta");
+  const metaContent = (name) => {
+    const tag = metaTags.find((candidate) => parsedAttribute(candidate, "name").toLowerCase() === name);
+    return tag ? parsedAttribute(tag, "content").toLowerCase() : "";
+  };
+  return {
+    annotationMode: metaContent("lavish-annotation-mode") !== "off",
+    faviconTag,
+    mediaTransportEnabled: metaContent("lavish-media-transport") === "video",
+    title,
+  };
 }
 
 export function createChromeHtml(
@@ -1468,12 +1638,16 @@ export function createChromeHtml(
     artifactLoadToken = "",
     artifactLoadSequence = 0,
     chromeLoadToken = "",
+    initialAnnotationMode = true,
+    mediaTransportEnabled = false,
   } = {},
 ) {
   const sessionJson = jsonScript({
     key: session.key,
     file: session.file,
     initialChat: session.chat || [],
+    initialPendingPrompts: Number.isSafeInteger(session.pending_prompts) ? session.pending_prompts : 0,
+    reviewIncarnation: session.review_incarnation || "",
     // Bootstrapping the inbox from the server is what makes it survive a browser refresh or a
     // reconnect: the chrome never owns warning state, it only renders it.
     initialLayoutWarnings: serializeLayoutWarnings(session.layout_warnings),
@@ -1482,6 +1656,8 @@ export function createChromeHtml(
     initialArtifactLoadSequence: artifactLoadSequence,
     chromeLoadToken,
     layoutGateEnabled,
+    initialAnnotationMode: initialAnnotationMode !== false,
+    mediaTransportEnabled: mediaTransportEnabled === true,
     modeToggleHotkeyKey: MODE_TOGGLE_HOTKEY_KEY,
   });
   const { head: pathHead, tail: pathTail } = displayPathParts(session.file);
@@ -1489,6 +1665,7 @@ export function createChromeHtml(
   const layoutGateHidden = layoutGateEnabled ? "" : " hidden";
   const modeHotkeyUpper = MODE_TOGGLE_HOTKEY_KEY.toUpperCase();
   const modeToggleHint = `Toggle annotate/explore mode (⌘${modeHotkeyUpper} / Ctrl+${modeHotkeyUpper})`;
+  const annotationPressed = initialAnnotationMode === false ? "false" : "true";
   return `<!doctype html>
 <html>
 <head>
@@ -1499,8 +1676,8 @@ ${faviconTag}
 <link rel="stylesheet" href="/chrome.css">
 </head>
 <body class="${bodyClass}">
-<div class="bar"><div class="brand"><span class="brand-mark">George</span><span class="brand-support">Showroom</span></div><div class="spacer" aria-hidden="true"></div><div class="warnings-wrap" id="warningsWrap" hidden><button class="warnings-button" id="warningsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="warningsDrawer">${chromeIcons.warning}<span class="warnings-count" id="warningsCount">0</span></button><div class="menu warnings-drawer" id="warningsDrawer" role="dialog" aria-labelledby="warningsTitle" aria-describedby="warningsSummary" hidden><div class="warnings-head"><h2 class="warnings-title" id="warningsTitle">Layout issues</h2><p class="warnings-summary" id="warningsSummary"></p></div><div class="warnings-toolbar"><label class="warnings-selectall"><input type="checkbox" id="warningsSelectAll"><span>Select all</span></label><span class="warnings-selected" id="warningsSelected" role="status" aria-live="polite"></span></div><div class="warnings-list" id="warningsList"></div><div class="warnings-foot"><p class="warnings-note">Queueing sends a repair request with your next feedback. An issue is marked resolved only after a newer artifact load and a complete check at the same viewport no longer finds it.</p><button class="button" id="warningsQueueButton" type="button" disabled>Queue selected fixes</button></div></div></div><button class="annotate-switch" id="annotation" type="button" aria-pressed="true" title="${escapeHtml(modeToggleHint)}"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span><span>Annotate</span></button><div class="more-wrap" id="moreWrap"><button class="more-button" id="moreButton" type="button" title="More" aria-haspopup="menu" aria-expanded="false">${chromeIcons.more}</button><div class="menu more-menu" id="moreMenu" hidden><div class="menu-head"><div class="menu-label">Editing</div><button class="menu-file" id="copyPath" type="button" title="Copy path · ${escapeHtml(session.file)}">${chromeIcons.file}<span class="menu-file-text"><span class="path-head">${escapeHtml(pathHead)}</span><span class="path-tail">${escapeHtml(pathTail)}</span></span><span class="copy-hint" id="copyHint"><span class="icon-copy">${chromeIcons.copy}</span><span class="icon-check">${chromeIcons.check}</span><span id="copyHintText">Copy</span></span></button></div><div class="menu-rule"></div><button class="menu-item" id="reloadArtifact" type="button">${chromeIcons.refresh}<span>Reload artifact</span></button><button class="menu-item" id="copySnapshot" type="button">${chromeIcons.camera}<span>Copy DOM snapshot</span></button><button class="menu-item" id="exportArtifact" type="button">${chromeIcons.download}<span>Export standalone HTML</span></button><button class="menu-item" id="shareArtifact" type="button">${chromeIcons.globe}<span>Publish link</span></button><div class="menu-rule"></div><button class="menu-item danger" id="end" type="button">${chromeIcons.exit}<span>End session</span></button></div></div></div>
-<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-downloads" data-artifact-src="/artifact/${session.key}/index.html"></iframe><div class="layout-issue-banner" id="layoutIssueBanner" hidden>Layout issues detected. Open <strong>Layout issues</strong> in the top bar to review and queue fixes.</div></div><aside class="panel"><h2>Conversation</h2><div class="panel-scroll" id="panelScroll"><div class="chat" id="chatLog"></div><div class="annotation-pills" id="annotationPills"></div></div><div class="composer"><div class="presence-banner handoff-banner" id="handoffBanner" hidden><span>This review is open in another George Showroom tab.</span><button class="handoff-takeover" id="handoffTakeover" type="button">Take over here</button></div><div class="presence-banner" id="presenceBanner" hidden>Your agent is not listening. If this persists, ask your agent to poll for updates from George Showroom.</div><textarea id="chatInput" placeholder="Write a message for the agent..."></textarea><div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first.</div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">${chromeIcons.exit}<span>Send &amp; End</span></button><button class="button" id="send">Send to Agent</button></div></div></aside></div>
+<div class="bar"><div class="brand"><span class="brand-mark">George</span><span class="brand-support">Showroom</span></div><div class="spacer" aria-hidden="true"></div><div class="warnings-wrap" id="warningsWrap" hidden><button class="warnings-button" id="warningsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="warningsDrawer">${chromeIcons.warning}<span class="warnings-count" id="warningsCount">0</span></button><div class="menu warnings-drawer" id="warningsDrawer" role="dialog" aria-labelledby="warningsTitle" aria-describedby="warningsSummary" hidden><div class="warnings-head"><h2 class="warnings-title" id="warningsTitle">Layout issues</h2><p class="warnings-summary" id="warningsSummary"></p></div><div class="warnings-toolbar"><label class="warnings-selectall"><input type="checkbox" id="warningsSelectAll"><span>Select all</span></label><span class="warnings-selected" id="warningsSelected" role="status" aria-live="polite"></span></div><div class="warnings-list" id="warningsList"></div><div class="warnings-foot"><p class="warnings-note">Queueing sends a repair request with your next feedback. An issue is marked resolved only after a newer artifact load and a complete check at the same viewport no longer finds it.</p><button class="button" id="warningsQueueButton" type="button" disabled>Queue selected fixes</button></div></div></div><button class="annotate-switch" id="annotation" type="button" aria-pressed="${annotationPressed}" title="${escapeHtml(modeToggleHint)}"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span><span>Annotate</span></button><div class="more-wrap" id="moreWrap"><button class="more-button" id="moreButton" type="button" title="More" aria-haspopup="menu" aria-expanded="false">${chromeIcons.more}</button><div class="menu more-menu" id="moreMenu" hidden><div class="menu-head"><div class="menu-label">Editing</div><button class="menu-file" id="copyPath" type="button" title="Copy path · ${escapeHtml(session.file)}">${chromeIcons.file}<span class="menu-file-text"><span class="path-head">${escapeHtml(pathHead)}</span><span class="path-tail">${escapeHtml(pathTail)}</span></span><span class="copy-hint" id="copyHint"><span class="icon-copy">${chromeIcons.copy}</span><span class="icon-check">${chromeIcons.check}</span><span id="copyHintText">Copy</span></span></button></div><div class="menu-rule"></div><button class="menu-item" id="reloadArtifact" type="button">${chromeIcons.refresh}<span>Reload artifact</span></button><button class="menu-item" id="copySnapshot" type="button">${chromeIcons.camera}<span>Copy DOM snapshot</span></button><button class="menu-item" id="exportArtifact" type="button">${chromeIcons.download}<span>Export standalone HTML</span></button><button class="menu-item" id="shareArtifact" type="button">${chromeIcons.globe}<span>Publish link</span></button><div class="menu-rule"></div><button class="menu-item danger" id="end" type="button">${chromeIcons.exit}<span>End session</span></button></div></div></div>
+<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-downloads" data-artifact-src="/artifact/${session.key}/index.html"></iframe><div class="layout-issue-banner" id="layoutIssueBanner" hidden>Layout issues detected. Open <strong>Layout issues</strong> in the top bar to review and queue fixes.</div></div><aside class="panel"><h2>Conversation</h2><div class="panel-scroll" id="panelScroll"><div class="chat" id="chatLog"></div><div class="annotation-pills" id="annotationPills"></div></div><div class="composer"><div class="presence-banner handoff-banner" id="handoffBanner" hidden><span>This review is open in another George Showroom tab.</span><button class="handoff-takeover" id="handoffTakeover" type="button">Take over here</button></div><div class="presence-banner" id="presenceBanner" hidden>Your agent is not listening. Feedback is saved for the next poll of this artifact.</div><textarea id="chatInput" placeholder="Write a message for the agent..."></textarea><div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first.</div><div class="send-status" id="sendStatus" role="status" aria-live="polite" hidden></div><div class="submission-recovery" id="submissionRecovery" hidden><p>Copy exports prompts, metadata, timecodes, and the page snapshot; it may contain private review context.</p><button type="button" id="copyRetainedBatch">Copy retained feedback</button><button type="button" id="unlockRetainedBatch" title="Creates a new identity and may duplicate feedback that was already delivered">Unlock for requeue</button></div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">${chromeIcons.exit}<span>Send &amp; End</span></button><button class="button" id="send">Send to Agent</button></div></div></aside></div>
 <div class="share-overlay" id="shareDialog" role="dialog" aria-modal="true" aria-labelledby="shareTitleText" hidden><form class="share-card" id="shareForm"><div class="share-head"><div><div class="share-kicker">Publish to <a class="share-link" href="https://ht-ml.app" target="_blank" rel="noopener noreferrer">ht-ml.app</a></div><h2 id="shareTitleText">Publish artifact</h2></div><button class="share-close" id="shareClose" type="button" aria-label="Close publish dialog"><svg width="14" height="14" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div><p class="share-note">ht-ml.app is a separate, third-party hosting service, not part of George Showroom. Publishing sends this artifact to its servers.</p><p class="share-copy">This uploads this artifact to ht-ml.app with local assets inlined. Without a password, the page is PUBLIC and anyone with the link can open it. With a password, the page is PRIVATE and viewers must supply the password to view.</p><p class="share-note">Do not publish secrets. The George Showroom annotation SDK is not included.</p><div class="share-grid"><label>Password (optional)<input id="sharePassword" name="password" type="password" autocomplete="new-password" placeholder="Leave blank for a public page"></label></div><div class="share-status" id="shareStatus" role="status"></div><div class="share-result" id="shareResult" hidden><label>Share URL<div class="share-copy-row"><input id="shareUrl" readonly><button class="share-copy-btn" id="copyShareUrl" type="button">Copy URL</button></div></label><label>Update key (secret)<div class="share-copy-row"><input id="shareUpdateKey" readonly><button class="share-copy-btn" id="copyUpdateKey" type="button">Copy key</button></div></label><p class="share-note">Keep the update key private. ht-ml.app returns it once and it is the only way to update or delete this page later.</p></div><div class="share-actions"><button class="share-cancel" id="shareCancel" type="button">Cancel</button><button class="button" id="sharePublish" type="submit">Publish</button></div></form></div>
 <div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"${layoutGateHidden}><div class="ended-card"><div class="ended-title" id="layoutGateTitle">Checking layout.<br>One moment.</div><p class="ended-copy" id="layoutGateCopy">George Showroom is waiting for fonts and final geometry before revealing this artifact.</p><button class="button ended-action" id="layoutGateAction" type="button">Show anyway</button></div></div>
 <div class="ended-overlay" id="endedOverlay" hidden><div class="ended-card"><div class="ended-title">Session ended.<br>Return to your agent to continue.</div><p class="ended-copy">${escapeHtml(session.file)}</p></div></div>
@@ -1547,6 +1724,10 @@ const deriveQueueKey=${deriveLavishQueueKey.toString()};
 const isNativeInteractiveControl=${isNativeInteractiveControl.toString()};
 const MODE_TOGGLE_HOTKEY_KEY=${JSON.stringify(MODE_TOGGLE_HOTKEY_KEY)};
 const isModeToggleHotkeyEvent=${isModeToggleHotkeyEvent.toString()};
+const mediaTransportActionForEvent=${mediaTransportActionForEvent.toString()};
+const isMediaTransportBlockedTarget=${isMediaTransportBlockedTarget.toString()};
+const isMediaTransportBlockedEvent=${isMediaTransportBlockedEvent.toString()};
+const applyMediaTransport=${applyMediaTransport.toString()};
 const classifySevereTextOverflow=${classifySevereTextOverflow.toString()};
 const classifyMaterialRectEscape=${classifyMaterialRectEscape.toString()};
 const isMaterialPageOverflow=${isMaterialPageOverflow.toString()};

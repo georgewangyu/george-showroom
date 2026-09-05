@@ -11,6 +11,71 @@ export function isModeToggleHotkeyEvent(event) {
   return Boolean(event.metaKey || event.ctrlKey) && String(event.key || "").toLowerCase() === MODE_TOGGLE_HOTKEY_KEY;
 }
 
+export function mediaTransportActionForEvent(event) {
+  if (event?.metaKey || event?.ctrlKey || event?.altKey || event?.shiftKey || event?.isComposing) return null;
+  const key = String(event?.key || "").toLowerCase();
+  const isToggle = key === " " || key === "spacebar" || key === "k" || event?.code === "Space";
+  if (isToggle) return event?.repeat ? null : { type: "toggle" };
+  if (key === "j") return { type: "seek", seconds: -10 };
+  if (key === "l") return { type: "seek", seconds: 10 };
+  if (key === "arrowleft") return { type: "seek", seconds: -5 };
+  if (key === "arrowright") return { type: "seek", seconds: 5 };
+  return null;
+}
+
+export function isMediaTransportBlockedTarget(target) {
+  // The review's video surface is the one intentional keyboard-operable exception:
+  // transport keys must still work when the video itself has tabindex or an ARIA role.
+  if (String(target?.tagName || target?.nodeName || "").toLowerCase() === "video") return false;
+  return !!(
+    target &&
+    target.closest &&
+    target.closest(
+      "button,input,select,textarea,option,optgroup,label,summary,a[href],[contenteditable]:not([contenteditable='false']),[data-lavish-action],[role='button'],[role='link'],[role='checkbox'],[role='radio'],[role='switch'],[role='tab'],[role='menuitem'],[role='menuitemcheckbox'],[role='menuitemradio'],[role='slider'],[role='spinbutton'],[role='combobox'],[role='option'],[role='treeitem'],[tabindex]:not([tabindex='-1'])",
+    )
+  );
+}
+
+export function isMediaTransportBlockedEvent(event) {
+  const targetName = String(event?.target?.tagName || event?.target?.nodeName || "").toLowerCase();
+  if (targetName === "video") return false;
+  const path = typeof event?.composedPath === "function" ? event.composedPath() : [event?.target];
+  return path.some((target) => isMediaTransportBlockedTarget(target));
+}
+
+export function applyMediaTransport(media, action) {
+  if (!media || !action || typeof action !== "object") return false;
+  if (action.type === "toggle") {
+    if (media.paused || media.ended) {
+      if (media.ended) {
+        try {
+          media.currentTime = 0;
+        } catch {
+          // A not-yet-ready media element can still attempt native play below.
+        }
+      }
+      const playResult = media.play?.();
+      if (playResult?.catch) playResult.catch(() => {});
+    } else {
+      media.pause?.();
+    }
+    return true;
+  }
+
+  if (action.type === "seek" && Number.isFinite(Number(action.seconds))) {
+    const current = Number.isFinite(Number(media.currentTime)) ? Number(media.currentTime) : 0;
+    const duration = Number(media.duration);
+    const upper = Number.isFinite(duration) && duration >= 0 ? duration : Number.POSITIVE_INFINITY;
+    try {
+      media.currentTime = Math.min(upper, Math.max(0, current + Number(action.seconds)));
+    } catch {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 // Derive the browser-only replacement key used to collapse unsent updates for the same input.
 // The key is stripped by the chrome before prompts are sent to the server or returned by poll.
 export function deriveLavishQueueKey(element, options = {}) {
@@ -257,7 +322,21 @@ export function createArtifactSdk(
   function postArtifactMessage(type, payload = {}) {
     parent.postMessage({ type, ...payload, artifact_load_token: String(artifactLoadToken || "") }, "*");
   }
-  let annotationMode = true;
+  function metaContent(name) {
+    const meta = [...document.querySelectorAll("meta[name]")].find(
+      (candidate) =>
+        String(candidate.getAttribute("name") || "")
+          .trim()
+          .toLowerCase() === name,
+    );
+    return String(meta?.getAttribute("content") || "")
+      .trim()
+      .toLowerCase();
+  }
+
+  let annotationMode = metaContent("lavish-annotation-mode") !== "off";
+  const mediaTransportEnabled = metaContent("lavish-media-transport") === "video";
+  let lastMedia = null;
   let hovered = null;
   let selected = null;
   let ignoreNextClick = false;
@@ -684,6 +763,41 @@ export function createArtifactSdk(
     setMermaidFrozen(annotationMode);
   }
 
+  function mediaElementFromTarget(target) {
+    const media = target?.closest?.("video");
+    return media && String(media.tagName || "").toLowerCase() === "video" ? media : null;
+  }
+
+  function mediaTransportIsBlocked(event) {
+    return isMediaTransportBlockedEvent(event);
+  }
+
+  function selectTransportMedia(target) {
+    const targeted = mediaElementFromTarget(target);
+    if (targeted) return targeted;
+    const videos = [...document.querySelectorAll("video")];
+    if (
+      lastMedia &&
+      lastMedia.isConnected !== false &&
+      videos.includes(lastMedia) &&
+      !lastMedia.paused &&
+      !lastMedia.ended
+    )
+      return lastMedia;
+    const playing = videos.find((video) => !video.paused && !video.ended);
+    if (playing) return playing;
+    if (lastMedia && lastMedia.isConnected !== false && videos.includes(lastMedia)) return lastMedia;
+    return videos[0] || null;
+  }
+
+  function handleMediaTransport(action, target) {
+    if (!mediaTransportEnabled || !action || typeof action !== "object") return false;
+    const media = selectTransportMedia(target);
+    if (!media) return false;
+    lastMedia = media;
+    return applyMediaTransport(media, action);
+  }
+
   function queuePrompt(prompt, options = {}) {
     const originElement = options.element || document.activeElement || document.body;
     /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: unknown, _lavishQueueKey?: string }} */
@@ -710,6 +824,19 @@ export function createArtifactSdk(
 
   function endSession() {
     postArtifactMessage("lavish:endSession");
+  }
+
+  function sendAndEnd() {
+    postArtifactMessage("lavish:sendAndEnd");
+  }
+
+  let queueState = { count: 0 };
+
+  function updateQueueState(value) {
+    const candidate = Number(value?.count);
+    const count = Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : 0;
+    queueState = { count };
+    window.dispatchEvent(new CustomEvent("lavish:queueState", { detail: { ...queueState } }));
   }
 
   function snapshot() {
@@ -1745,22 +1872,32 @@ export function createArtifactSdk(
   /** @type {Window & { lavish?: unknown }} */ (window).lavish = {
     queuePrompt,
     sendQueuedPrompts,
+    sendAndEnd,
     endSession,
     getQueuedPrompts: () => [],
+    getQueueState: () => ({ ...queueState }),
     setStatus: (message) => postArtifactMessage("lavish:status", { message: String(message) }),
     snapshot,
   };
 
   window.addEventListener("message", (event) => {
+    // Only the embedding Showroom chrome may issue authoritative control or queue-state
+    // messages to this sandboxed artifact. Ignore sibling, child, and page-script spoofs.
+    if (event.source !== parent) return;
     const msg = event.data || {};
     if (msg.type === "lavish:setAnnotationMode") setAnnotationMode(msg.enabled);
     if (msg.type === "lavish:requestSnapshot") {
-      postArtifactMessage("lavish:snapshot", { snapshot: snapshot() });
+      postArtifactMessage("lavish:snapshot", {
+        requestId: String(msg.requestId || ""),
+        snapshot: snapshot(),
+      });
     }
     if (msg.type === "lavish:restoreScroll") {
       window.scrollTo(Number(msg.x) || 0, Number(msg.y) || 0);
     }
     if (msg.type === "lavish:restoreReviewState") restoreReviewState(msg.state);
+    if (msg.type === "lavish:queueState") updateQueueState(msg);
+    if (msg.type === "lavish:mediaTransport") handleMediaTransport(msg.action);
     if (msg.type === "lavish:revealElement") revealElement(msg.selector);
   });
 
@@ -1796,6 +1933,29 @@ export function createArtifactSdk(
     },
     true,
   );
+
+  // Video-review artifacts opt into conventional transport keys. Handle them inside the
+  // sandbox and let the chrome relay the same actions when focus is outside this iframe.
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (!mediaTransportEnabled || mediaTransportIsBlocked(event)) return;
+      const action = mediaTransportActionForEvent(event);
+      if (!action || !handleMediaTransport(action, event.target)) return;
+      event.preventDefault();
+    },
+    true,
+  );
+  for (const eventName of ["play", "pointerdown", "focusin"]) {
+    document.addEventListener(
+      eventName,
+      (event) => {
+        const media = mediaElementFromTarget(event.target);
+        if (media) lastMedia = media;
+      },
+      true,
+    );
+  }
 
   // Report scroll position to the chrome so it can be restored across hot reloads.
   // The iframe is sandboxed without same-origin, so the chrome can't read scrollY directly.
