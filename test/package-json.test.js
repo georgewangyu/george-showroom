@@ -2,6 +2,29 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+function extractFrontmatter(markdown) {
+  const end = markdown.indexOf("\n---\n", 4);
+
+  assert.ok(markdown.startsWith("---\n"), "starts with frontmatter fence");
+  assert.ok(end > 0, "frontmatter is closed");
+
+  return markdown.slice(4, end);
+}
+
+function frontmatterHasInternalMetadata(frontmatter) {
+  const lines = frontmatter.split("\n");
+  const metadataIndex = lines.findIndex((line) => line === "metadata:");
+
+  if (metadataIndex === -1) return false;
+
+  for (const line of lines.slice(metadataIndex + 1)) {
+    if (!line.startsWith(" ")) return false;
+    if (line === "  internal: true") return true;
+  }
+
+  return false;
+}
+
 test("check script runs all verification commands", async () => {
   const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const checkCommands = packageJson.scripts.check.split(" && ");
@@ -65,17 +88,33 @@ test("release-please keeps the plugin manifest version in step with the package"
 
 test("lavish-design agent skill is marked internal for skills CLI discovery", async () => {
   const skillMd = await readFile(new URL("../.agents/skills/lavish-design/SKILL.md", import.meta.url), "utf8");
-  const frontmatter = skillMd.slice(4, skillMd.indexOf("\n---\n", 4));
+  const frontmatter = extractFrontmatter(skillMd);
 
   assert.match(frontmatter, /^name: lavish-design$/m);
-  assert.match(frontmatter, /^metadata:\n {2}internal: true$/m);
+  assert.equal(frontmatterHasInternalMetadata(frontmatter), true);
 });
 
 test("public George Showroom skill is not marked internal", async () => {
-  const skillMd = await readFile(new URL("../skills/george-showroom/SKILL.md", import.meta.url), "utf8");
-  const frontmatter = skillMd.slice(4, skillMd.indexOf("\n---\n", 4));
+  const skillFiles = ["../skills/george-showroom/SKILL.md", "../skills/lavish/SKILL.md"];
 
-  assert.doesNotMatch(frontmatter, /^metadata:\n {2}internal: true$/m);
+  for (const skillFile of skillFiles) {
+    const skillMd = await readFile(new URL(skillFile, import.meta.url), "utf8");
+    const frontmatter = extractFrontmatter(skillMd);
+
+    assert.equal(frontmatterHasInternalMetadata(frontmatter), false, skillFile);
+  }
+});
+
+test("public skill internal guard scans the whole metadata block", () => {
+  const frontmatter = [
+    "name: george-showroom",
+    "metadata:",
+    "  hermes:",
+    "    category: productivity",
+    "  internal: true",
+  ].join("\n");
+
+  assert.equal(frontmatterHasInternalMetadata(frontmatter), true);
 });
 
 test("build copies local design assets for published artifact injection", async () => {

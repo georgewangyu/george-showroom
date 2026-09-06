@@ -1,4 +1,4 @@
-// Generates the primary George Showroom skill and temporary Lavish compatibility skill
+// Generates the public George Showroom skill and temporary public Lavish compatibility skill
 // from shared CLI guidance so neither drifts from the runtime contract.
 //
 //   node scripts/build-skill.js          # write the file
