@@ -1,5 +1,254 @@
 # Changelog
 
+## [0.1.77](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.76...lavish-axi-v0.1.77) (2026-09-22)
+
+
+### Bug Fixes
+
+* clarify HTML file output in the Lavish skill ([#344](https://github.com/kunchenguid/lavish-axi/issues/344)) ([a3b3987](https://github.com/kunchenguid/lavish-axi/commit/a3b3987062bb77441bbe6bd0cf40cc431f18888e))
+
+## [0.1.76](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.75...lavish-axi-v0.1.76) (2026-09-21)
+
+
+### Features
+
+* **chrome:** add revision legend for agent-declared artifact edits ([#361](https://github.com/kunchenguid/lavish-axi/issues/361)) ([b4e82c6](https://github.com/kunchenguid/lavish-axi/commit/b4e82c63563cc9b4feaf947db53ec44902d10fb8))
+
+## [0.1.75](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.74...lavish-axi-v0.1.75) (2026-09-20)
+
+
+### Features
+
+* add exclusive visible poll listeners ([#358](https://github.com/kunchenguid/lavish-axi/issues/358)) ([d5ac546](https://github.com/kunchenguid/lavish-axi/commit/d5ac5468e5db3099d08c574c120472c75f5374d2))
+
+## [0.1.74](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.73...lavish-axi-v0.1.74) (2026-09-20)
+
+
+### Features
+
+* **poll:** add opt-in Herdr readiness chime ([#355](https://github.com/kunchenguid/lavish-axi/issues/355)) ([20159e0](https://github.com/kunchenguid/lavish-axi/commit/20159e0726ba73c9e19db08a388dd1aa5673028c))
+
+
+### Bug Fixes
+
+* **server:** record startup and runtime failures ([#357](https://github.com/kunchenguid/lavish-axi/issues/357)) ([2430a3f](https://github.com/kunchenguid/lavish-axi/commit/2430a3fed654ff46354f987a8dbc4896552fdf0b))
+
+## [0.1.73](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.72...lavish-axi-v0.1.73) (2026-09-19)
+
+
+### Bug Fixes
+
+* **server:** make live-review failures recoverable ([#353](https://github.com/kunchenguid/lavish-axi/issues/353)) ([c5bdea4](https://github.com/kunchenguid/lavish-axi/commit/c5bdea49c684ffd074a07d19232783dc37f6605e))
+
+## [0.1.72](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.71...lavish-axi-v0.1.72) (2026-09-17)
+
+
+### Features
+
+* **playbooks:** add explanation playbook for existing systems ([#347](https://github.com/kunchenguid/lavish-axi/issues/347)) ([a3504db](https://github.com/kunchenguid/lavish-axi/commit/a3504db27f00aef1a8d6413a7a3db637833bf603))
+
+## [0.1.71](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.70...lavish-axi-v0.1.71) (2026-09-16)
+
+
+### Bug Fixes
+
+* **cli:** preserve structure in longer agent replies ([#342](https://github.com/kunchenguid/lavish-axi/issues/342)) ([5d72def](https://github.com/kunchenguid/lavish-axi/commit/5d72def61d1cb5be2e54e61941d083eb1fa78426))
+
+## [0.1.70](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.69...lavish-axi-v0.1.70) (2026-09-16)
+
+
+### Bug Fixes
+
+* bound stored review transcripts ([#340](https://github.com/kunchenguid/lavish-axi/issues/340)) ([93eb9c0](https://github.com/kunchenguid/lavish-axi/commit/93eb9c08fd451fd0d44f6185b8babd50a4d4d709))
+
+## [0.1.69](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.68...lavish-axi-v0.1.69) (2026-09-16)
+
+
+### Features
+
+* add structured conversation history ([#337](https://github.com/kunchenguid/lavish-axi/issues/337)) ([c95f3c4](https://github.com/kunchenguid/lavish-axi/commit/c95f3c474beebcb0f0df09a5e90ef5ab5633bb84))
+
+
+### Bug Fixes
+
+* settle queued feedback by durable prompt identity ([#339](https://github.com/kunchenguid/lavish-axi/issues/339)) ([7f1c477](https://github.com/kunchenguid/lavish-axi/commit/7f1c47744773a3db5f1af97bd256a347ee9680b8))
+
+## [0.1.68](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.67...lavish-axi-v0.1.68) (2026-09-15)
+
+
+### Bug Fixes
+
+* **chrome:** prevent feedback from stalling during snapshot capture ([#334](https://github.com/kunchenguid/lavish-axi/issues/334)) ([830efa8](https://github.com/kunchenguid/lavish-axi/commit/830efa80da49dda662232594630bf0c4e459fee8))
+
+## [0.1.67](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.66...lavish-axi-v0.1.67) (2026-09-07)
+
+
+### Bug Fixes
+
+* **server:** release polls after review browser disconnects ([#329](https://github.com/kunchenguid/lavish-axi/issues/329)) ([dcf49d3](https://github.com/kunchenguid/lavish-axi/commit/dcf49d3ff6e2e0789d1ebdf9c03ceca4a08d11fb))
+
+## [0.1.66](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.65...lavish-axi-v0.1.66) (2026-09-06)
+
+
+### Features
+
+* add tracked batch input guidance ([#327](https://github.com/kunchenguid/lavish-axi/issues/327)) ([38747bf](https://github.com/kunchenguid/lavish-axi/commit/38747bfc0f554b3088990a053ab36968e2c8619a))
+
+## [0.1.65](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.64...lavish-axi-v0.1.65) (2026-09-05)
+
+
+### Bug Fixes
+
+* keep multiple review boards responsive ([#324](https://github.com/kunchenguid/lavish-axi/issues/324)) ([27be6be](https://github.com/kunchenguid/lavish-axi/commit/27be6bee7368fe08072c1448a4541d20d6ec2a6b))
+
+## [0.1.64](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.63...lavish-axi-v0.1.64) (2026-09-03)
+
+
+### Bug Fixes
+
+* attachment upload 500s behind a reverse proxy (x-forwarded-host) ([#319](https://github.com/kunchenguid/lavish-axi/issues/319)) ([19a0800](https://github.com/kunchenguid/lavish-axi/commit/19a0800809c469d7924daf5cee1d80dbbef3175f))
+
+## [0.1.63](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.62...lavish-axi-v0.1.63) (2026-08-29)
+
+
+### Bug Fixes
+
+* **server:** keep agent-working presence across overlapping polls ([#301](https://github.com/kunchenguid/lavish-axi/issues/301)) ([0e77263](https://github.com/kunchenguid/lavish-axi/commit/0e77263cf20a95da49ab08c71c4176b38050fe73))
+
+## [0.1.62](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.61...lavish-axi-v0.1.62) (2026-08-24)
+
+
+### Features
+
+* **artifact-sdk:** close an empty annotation card on Escape ([#293](https://github.com/kunchenguid/lavish-axi/issues/293)) ([2b563e1](https://github.com/kunchenguid/lavish-axi/commit/2b563e17a9cb70757d77a1b979c811482d71d3b9)), closes [#292](https://github.com/kunchenguid/lavish-axi/issues/292)
+
+## [0.1.61](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.60...lavish-axi-v0.1.61) (2026-08-24)
+
+
+### Features
+
+* teach diagrams from zero, one concept at a time ([#290](https://github.com/kunchenguid/lavish-axi/issues/290)) ([21737a6](https://github.com/kunchenguid/lavish-axi/commit/21737a63a296a4c856b7b4fb7bdfe16e94b132d3))
+
+## [0.1.60](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.59...lavish-axi-v0.1.60) (2026-08-24)
+
+
+### Features
+
+* add automatic Tailscale phone access ([#289](https://github.com/kunchenguid/lavish-axi/issues/289)) ([443aaa9](https://github.com/kunchenguid/lavish-axi/commit/443aaa99c381851ea4e01d27b86af979166e7a28))
+* **share:** publish a private link with a generated password ([#287](https://github.com/kunchenguid/lavish-axi/issues/287)) ([c9a9a8e](https://github.com/kunchenguid/lavish-axi/commit/c9a9a8e99d68acb15e78bc5fc1d15c5d53f5a357))
+
+
+### Bug Fixes
+
+* keep the shipped skill as a minimal CLI-deferring stub ([#286](https://github.com/kunchenguid/lavish-axi/issues/286)) ([f658fb8](https://github.com/kunchenguid/lavish-axi/commit/f658fb83a59441fc7da31f4a0b3bed18b0f73ff3))
+
+## [0.1.59](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.58...lavish-axi-v0.1.59) (2026-08-23)
+
+
+### Bug Fixes
+
+* **chrome:** prevent layout gate sticky failure traps ([#284](https://github.com/kunchenguid/lavish-axi/issues/284)) ([7024bc4](https://github.com/kunchenguid/lavish-axi/commit/7024bc464f63f117767adf8ab6e680e6f06f2aa2))
+
+## [0.1.58](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.57...lavish-axi-v0.1.58) (2026-08-23)
+
+
+### Features
+
+* default diagram guidance to hand-authored SVG, Mermaid becomes the whiteboard opt-in ([#282](https://github.com/kunchenguid/lavish-axi/issues/282)) ([ea7e0ad](https://github.com/kunchenguid/lavish-axi/commit/ea7e0ad5f0ed9548c57c3ff9ef808928f1e465bc))
+
+## [0.1.57](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.56...lavish-axi-v0.1.57) (2026-08-23)
+
+
+### Bug Fixes
+
+* make ended review sessions read-only ([#273](https://github.com/kunchenguid/lavish-axi/issues/273)) ([bafce3d](https://github.com/kunchenguid/lavish-axi/commit/bafce3d56eb8d9ed9853783da543ee0844182ac2))
+
+## [0.1.56](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.55...lavish-axi-v0.1.56) (2026-08-22)
+
+
+### Bug Fixes
+
+* replace clipped mobile conversation with bottom sheet ([#275](https://github.com/kunchenguid/lavish-axi/issues/275)) ([7d4e5a9](https://github.com/kunchenguid/lavish-axi/commit/7d4e5a9fe09dfa21e8edafb4252bc757ecf44a29))
+
+## [0.1.55](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.54...lavish-axi-v0.1.55) (2026-08-21)
+
+
+### Bug Fixes
+
+* **server:** restore taken feedback when a long-poll client disconnects ([#270](https://github.com/kunchenguid/lavish-axi/issues/270)) ([3b2c10f](https://github.com/kunchenguid/lavish-axi/commit/3b2c10f58dcbc95b81a8f17c48a960a9f5aee379))
+
+## [0.1.54](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.53...lavish-axi-v0.1.54) (2026-08-20)
+
+
+### Features
+
+* **attachments:** support image paste, drop, and picker uploads in the conversation composer ([#248](https://github.com/kunchenguid/lavish-axi/issues/248)) ([4726242](https://github.com/kunchenguid/lavish-axi/commit/47262422fe34efb8373909775d3532b7eb354bdc))
+
+
+### Bug Fixes
+
+* add semantic names to table annotations ([#256](https://github.com/kunchenguid/lavish-axi/issues/256)) ([d27e2e8](https://github.com/kunchenguid/lavish-axi/commit/d27e2e8b489a3504cb1620c61dffc6d79afcae49))
+* **chrome:** recover a review that never finishes loading ([#268](https://github.com/kunchenguid/lavish-axi/issues/268)) ([30ef253](https://github.com/kunchenguid/lavish-axi/commit/30ef25389f409464a6f0a7d0121830e4a9335242))
+* **cli:** put poll feedback ahead of the DOM snapshot in output ([#266](https://github.com/kunchenguid/lavish-axi/issues/266)) ([9f42941](https://github.com/kunchenguid/lavish-axi/commit/9f429413694b28e1d968af0ac5061e4efe4a7234))
+* let artifact popups escape the iframe sandbox ([#258](https://github.com/kunchenguid/lavish-axi/issues/258)) ([c62b5f9](https://github.com/kunchenguid/lavish-axi/commit/c62b5f9606c06569df6a51949bae3d53e065dfc8))
+* preserve Mermaid label line breaks ([#237](https://github.com/kunchenguid/lavish-axi/issues/237)) ([c7db61c](https://github.com/kunchenguid/lavish-axi/commit/c7db61c438e290a04c3c403625c1351699b9d326))
+* **server:** keep sends available while an agent works and stop losing feedback on closed polls ([#265](https://github.com/kunchenguid/lavish-axi/issues/265)) ([cc186c2](https://github.com/kunchenguid/lavish-axi/commit/cc186c208e2cf5b30ffee782eda78b38ca79d387))
+* **server:** reject foreign origins on mutating routes ([#257](https://github.com/kunchenguid/lavish-axi/issues/257)) ([ec50b1e](https://github.com/kunchenguid/lavish-axi/commit/ec50b1e7304466fd559e6c06b3259b3d2da6189e))
+
+## [0.1.53](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.52...lavish-axi-v0.1.53) (2026-08-18)
+
+
+### Bug Fixes
+
+* avoid phantom whiteboard conflicts ([#252](https://github.com/kunchenguid/lavish-axi/issues/252)) ([196d24f](https://github.com/kunchenguid/lavish-axi/commit/196d24f132e6361a432509e8f634ba16b8976154))
+
+## [0.1.52](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.51...lavish-axi-v0.1.52) (2026-08-15)
+
+
+### Bug Fixes
+
+* **whiteboard:** preserve Mermaid node label line breaks in Excalidraw ([#246](https://github.com/kunchenguid/lavish-axi/issues/246)) ([2dd70d8](https://github.com/kunchenguid/lavish-axi/commit/2dd70d8db771bf5bf1742a186a1ed196e1a16881))
+
+## [0.1.51](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.50...lavish-axi-v0.1.51) (2026-08-14)
+
+
+### Features
+
+* **attachments:** attach reference images to annotations and deliver them to the agent ([#188](https://github.com/kunchenguid/lavish-axi/issues/188)) ([3b25cbd](https://github.com/kunchenguid/lavish-axi/commit/3b25cbd00ae3406c79c681ca24d751a5bc84e761))
+
+## [0.1.50](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.49...lavish-axi-v0.1.50) (2026-08-11)
+
+
+### Bug Fixes
+
+* **server:** harden feedback submission boundaries ([#235](https://github.com/kunchenguid/lavish-axi/issues/235)) ([89412ca](https://github.com/kunchenguid/lavish-axi/commit/89412ca1c0c8490476edffa065317cd0e093afc8))
+
+## [0.1.49](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.48...lavish-axi-v0.1.49) (2026-08-11)
+
+
+### Bug Fixes
+
+* **server:** confine artifact asset route by realpath (symlink-escape hardening) ([#194](https://github.com/kunchenguid/lavish-axi/issues/194)) ([6215658](https://github.com/kunchenguid/lavish-axi/commit/62156587cd163f14e90c0e7014492d1961afa5f7))
+
+## [0.1.48](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.47...lavish-axi-v0.1.48) (2026-08-10)
+
+
+### Features
+
+* **cli:** guard against invisible unpainted artifacts ([#230](https://github.com/kunchenguid/lavish-axi/issues/230)) ([b285c40](https://github.com/kunchenguid/lavish-axi/commit/b285c40a55a4d84fdb321923794eff13f6fb5543))
+
+
+### Bug Fixes
+
+* streamline invisible artifact guidance ([#232](https://github.com/kunchenguid/lavish-axi/issues/232)) ([232972b](https://github.com/kunchenguid/lavish-axi/commit/232972beba9e0e4e75682c98f2aeb2cf01532122))
+
+## [0.1.47](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.46...lavish-axi-v0.1.47) (2026-08-09)
+
+
+### Bug Fixes
+
+* **chrome:** remove persistent layout issue banner ([#226](https://github.com/kunchenguid/lavish-axi/issues/226)) ([fb9107e](https://github.com/kunchenguid/lavish-axi/commit/fb9107e2d1e8e1820d93ad977a121f34a66e13be))
+
 ## [0.1.46](https://github.com/kunchenguid/lavish-axi/compare/lavish-axi-v0.1.45...lavish-axi-v0.1.46) (2026-08-07)
 
 

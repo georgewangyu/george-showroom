@@ -56,40 +56,20 @@ import { serve } from "../src/server.js";
 import { canonicalFile, sessionKey } from "../src/session-store.js";
 
 async function waitForPollListening(base, key, timeoutMs = 10_000) {
-  const controller = new AbortController();
-  const res = await fetch(`${base}/events/${key}`, { signal: controller.signal });
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  // Live events moved from HTTP-SSE (/events/:key) to WebSocket in v0.1.77, so the poll's
+  // "listening" presence is observed via the server's /health listeners rather than an SSE feed.
   const deadline = Date.now() + timeoutMs;
-  try {
-    while (true) {
-      const match = buffer.match(/^event: agent-presence\ndata: (.+)\n\n/m);
-      if (match) {
-        buffer = buffer.replace(match[0], "");
-        if (JSON.parse(match[1]).state === "listening") return;
-        continue;
-      }
-      const remaining = Math.max(1, deadline - Date.now());
-      let timer;
-      let value;
-      let done;
-      try {
-        ({ value, done } = await Promise.race([
-          reader.read(),
-          new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error("timed out waiting for listening presence")), remaining);
-          }),
-        ]));
-      } finally {
-        clearTimeout(timer);
-      }
-      if (done) throw new Error("presence stream closed before listening");
-      buffer += decoder.decode(value, { stream: true });
+  while (Date.now() < deadline) {
+    try {
+      const health = await fetch(`${base}/health`).then((res) => (res.ok ? res.json() : null));
+      const listeners = Array.isArray(health?.listeners) ? health.listeners : [];
+      if (listeners.some((listener) => listener?.key === key)) return;
+    } catch {
+      // transient; retry until the deadline
     }
-  } finally {
-    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  throw new Error("timed out waiting for listening presence");
 }
 
 /** @returns {NodeJS.ProcessEnv} */
@@ -976,7 +956,7 @@ test("share command publishes the artifact to ht-ml.app and returns the public u
   }
 });
 
-test("share command treats a whitespace-only password as public", async () => {
+test("share command refuses a whitespace-only password instead of publishing public", async () => {
   const dir = await mkdtemp(`${os.tmpdir()}/george-showroom-share-test-`);
   const artifact = `${dir}/report.html`;
   await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
@@ -1007,12 +987,11 @@ test("share command treats a whitespace-only password as public", async () => {
     });
     const code = await new Promise((resolve) => child.on("close", resolve));
 
-    assert.equal(code, 0, stderr);
-    assert.match(stdout, /PUBLIC/);
-    assert.match(stdout, /anyone with the link can view/);
-    assert.doesNotMatch(stdout, /PASSWORD-PROTECTED/);
-    assert.equal(requests.length, 1);
-    assert.equal("password" in requests[0].body, false);
+    // Merged to upstream share behavior (Decision B): a whitespace-only --password is REFUSED
+    // rather than silently publishing a PUBLIC page the user believed was gated.
+    assert.notEqual(code, 0, stderr);
+    assert.match(stdout + stderr, /empty value|worse failure|VALIDATION_ERROR/);
+    assert.equal(requests.length, 0);
   } finally {
     await htmlApp.close();
     await rm(dir, { force: true, recursive: true });
@@ -1049,8 +1028,8 @@ test("share help distinguishes public default from password-protected shares", (
   const homeShareHelp = home.help.find((item) => item.includes("george-showroom share <html-file>"));
 
   assert.match(help, /PUBLIC by default/);
-  assert.match(help, /Pass --password to publish a PRIVATE password-protected page/);
-  assert.match(help, /viewers must supply the password to view/);
+  assert.match(help, /Pass --private to publish a PRIVATE page/);
+  assert.match(help, /Pass --password <pw> instead when the user chose the password/);
   assert.match(help, /not blocked by CSP on ht-ml\.app/);
   assert.match(help, /load over the viewer's network/);
   assert.doesNotMatch(help, /EVERYTHING PUBLISHED IS PUBLIC/);

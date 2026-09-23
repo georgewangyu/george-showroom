@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { access, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -12,134 +11,6 @@ import * as esbuild from "esbuild";
 import { parse } from "parse5";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
-const delay = promisify(setTimeout);
-const execFileAsync = promisify(execFile);
-
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    throw error;
-  }
-}
-
-async function ownedChromePids(profile) {
-  if (process.platform === "win32") return [];
-  const { stdout } = await execFileAsync("/bin/ps", ["-axo", "pid=,command="], {
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  const marker = `--user-data-dir=${profile}`;
-  return stdout
-    .split("\n")
-    .filter((line) => line.includes(marker))
-    .map((line) => Number.parseInt(line.trimStart(), 10))
-    .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
-}
-
-function signalProcess(pid, signal) {
-  try {
-    process.kill(pid, signal);
-  } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
-  }
-}
-
-async function remainingChromePids(pid, profile) {
-  const remaining = new Set(await ownedChromePids(profile));
-  if (pid && processIsAlive(pid)) remaining.add(pid);
-  return [...remaining];
-}
-
-async function terminateChromeTree(pid, profile) {
-  if (!pid) return;
-  if (process.platform === "win32") {
-    try {
-      await execFileAsync("taskkill", ["/pid", String(pid), "/t", "/f"]);
-    } catch (error) {
-      if (!`${error?.stdout ?? ""}${error?.stderr ?? ""}`.includes("not found")) throw error;
-    }
-    return;
-  }
-  for (const ownedPid of await remainingChromePids(pid, profile)) signalProcess(ownedPid, "SIGTERM");
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await delay(25);
-    if ((await remainingChromePids(pid, profile)).length === 0) return;
-  }
-  for (const ownedPid of await remainingChromePids(pid, profile)) signalProcess(ownedPid, "SIGKILL");
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await delay(25);
-    if ((await remainingChromePids(pid, profile)).length === 0) return;
-  }
-  throw new Error(`Chrome processes for ${profile} did not terminate`);
-}
-
-async function runOwnedChrome(chrome, args) {
-  const profilePrefix = "--user-data-dir=";
-  const profile = args.find((arg) => arg.startsWith(profilePrefix))?.slice(profilePrefix.length);
-  if (!profile) throw new Error("Chrome test requires an owned user-data-dir");
-  const child = spawn(chrome, args, {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  /** @type {Buffer[]} */
-  const stdoutChunks = [];
-  /** @type {Buffer[]} */
-  const stderrChunks = [];
-  let outputBytes = 0;
-  const maxBuffer = 8 * 1024 * 1024;
-  let settled = false;
-  /** @type {ReturnType<typeof setTimeout> | undefined} */
-  let timeout;
-  try {
-    await new Promise((resolve, reject) => {
-      /** @param {Error} error */
-      const fail = (error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      };
-      /**
-       * @param {Buffer[]} chunks
-       * @param {boolean} [isStdout]
-       */
-      const collect =
-        (chunks, isStdout = false) =>
-        (/** @type {Buffer} */ chunk) => {
-          outputBytes += chunk.length;
-          if (outputBytes > maxBuffer) {
-            fail(new Error("Chrome output exceeded the 8 MiB test limit"));
-            return;
-          }
-          chunks.push(chunk);
-          if (isStdout && !settled) {
-            const html = Buffer.concat(stdoutChunks).toString("utf8");
-            if (html.includes("data-result") && resultFromDump(html)) {
-              settled = true;
-              resolve(undefined);
-            }
-          }
-        };
-      child.stdout.on("data", collect(stdoutChunks, true));
-      child.stderr.on("data", collect(stderrChunks));
-      child.once("error", fail);
-      child.once("exit", (code, signal) => {
-        if (settled) return;
-        settled = true;
-        if (code === 0) resolve(undefined);
-        else reject(new Error(`Chrome exited with code ${code} and signal ${signal}`));
-      });
-      timeout = setTimeout(() => fail(new Error("Chrome test timed out after 75 seconds")), 75_000);
-    });
-    return {
-      stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-      stderr: Buffer.concat(stderrChunks).toString("utf8"),
-    };
-  } finally {
-    if (timeout) clearTimeout(timeout);
-    if (child.pid) await terminateChromeTree(child.pid, profile);
-  }
-}
 
 async function chromePath() {
   const candidates = [
@@ -169,6 +40,43 @@ function contentType(file) {
   return "application/octet-stream";
 }
 
+function dumpChromeDom(chrome, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(chrome, args, { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    let settled = false;
+    const stop = () => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stop();
+      if (error) reject(error);
+      else resolve(stdout);
+    };
+    const timer = setTimeout(() => finish(new Error("Chrome did not dump the fixture DOM in time")), timeoutMs);
+    child.on("error", finish);
+    child.on("exit", (code) => {
+      if (!settled) finish(new Error(`Chrome exited before dumping the fixture DOM (${code})`));
+    });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 8 * 1024 * 1024) {
+        finish(new Error("Chrome fixture DOM exceeded 8 MB"));
+      } else if (stdout.includes("</html>")) {
+        finish();
+      }
+    });
+  });
+}
+
 function resultFromDump(html) {
   const document = parse(html);
   const stack = /** @type {import("parse5").DefaultTreeAdapterMap["node"][]} */ ([document]);
@@ -185,16 +93,16 @@ function resultFromDump(html) {
   return null;
 }
 
-test("real Excalidraw rendering keeps loaded-font labels inside their text bounds", { timeout: 90_000 }, async (t) => {
+async function runBrowserFixture(t, fixtureName) {
   const chrome = await chromePath();
   if (!chrome) {
     t.skip("Chrome or Chromium is required for the real-render regression");
-    return;
+    return null;
   }
   const root = await mkdtemp(path.join(os.tmpdir(), "lavish-excalidraw-render-"));
   try {
     await esbuild.build({
-      entryPoints: [path.join(projectRoot, "test/fixtures/excalidraw-label-clipping.browser.jsx")],
+      entryPoints: [path.join(projectRoot, `test/fixtures/${fixtureName}.browser.jsx`)],
       outdir: root,
       entryNames: "fixture",
       assetNames: "assets/[name]-[hash]",
@@ -219,7 +127,16 @@ test("real Excalidraw rendering keeps loaded-font labels inside their text bound
     );
     const server = http.createServer(async (request, response) => {
       try {
-        const pathname = new URL(request.url, "http://127.0.0.1").pathname;
+        const url = new URL(request.url, "http://127.0.0.1");
+        const pathname = url.pathname;
+        if (pathname === "/result") {
+          const value = String(url.searchParams.get("value") || "")
+            .replaceAll("&", "&amp;")
+            .replaceAll('"', "&quot;");
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+          response.end(`<!doctype html><html><body data-result="${value}"></body></html>`);
+          return;
+        }
         const relative = pathname === "/" ? "index.html" : decodeURIComponent(pathname.slice(1));
         const file = path.resolve(root, relative);
         if (file !== root && !file.startsWith(`${root}${path.sep}`)) throw new Error("outside fixture root");
@@ -234,27 +151,26 @@ test("real Excalidraw rendering keeps loaded-font labels inside their text bound
     try {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("test server did not bind to a TCP port");
-      const port = address.port;
       const profile = path.join(root, "chrome-profile");
-      const { stdout } = await runOwnedChrome(chrome, [
-        "--headless=new",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--no-sandbox",
-        `--user-data-dir=${profile}`,
-        "--run-all-compositor-stages-before-draw",
-        "--virtual-time-budget=20000",
-        "--dump-dom",
-        `http://127.0.0.1:${port}/`,
-      ]);
+      const stdout = await dumpChromeDom(
+        chrome,
+        [
+          "--headless=new",
+          "--disable-gpu",
+          "--disable-dev-shm-usage",
+          "--no-sandbox",
+          `--user-data-dir=${profile}`,
+          "--run-all-compositor-stages-before-draw",
+          "--virtual-time-budget=20000",
+          "--dump-dom",
+          `http://127.0.0.1:${address.port}/`,
+        ],
+        75_000,
+      );
       const result = resultFromDump(stdout);
       assert.ok(result, "browser fixture did not report a result");
       assert.equal(result.pass, true, result.error);
-      assert.equal(result.fontReady, true);
-      assert.equal(result.edgeLabels, 4);
-      assert.ok(result.multilineLines >= 2);
-      assert.ok(result.repaired >= 5);
-      assert.ok(result.opaquePixels >= 1000);
+      return result;
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
@@ -262,4 +178,22 @@ test("real Excalidraw rendering keeps loaded-font labels inside their text bound
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+test("real Excalidraw rendering keeps loaded-font labels inside their text bounds", { timeout: 90_000 }, async (t) => {
+  const result = await runBrowserFixture(t, "excalidraw-label-clipping");
+  if (!result) return;
+  assert.equal(result.fontReady, true);
+  assert.equal(result.edgeLabels, 4);
+  assert.ok(result.multilineLines >= 2);
+  assert.ok(result.repaired >= 5);
+  assert.ok(result.opaquePixels >= 1000);
+});
+
+test("mounted Excalidraw autosaves prompt only after genuine edits", { timeout: 90_000 }, async (t) => {
+  const result = await runBrowserFixture(t, "excalidraw-autosave-conflict");
+  if (!result) return;
+  assert.equal(result.preMountBaselineAction, "prompt");
+  assert.equal(result.viewOnlyAction, "convert");
+  assert.equal(result.editedAction, "prompt");
 });

@@ -1,5 +1,15 @@
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -14,8 +24,23 @@ import {
   exportWarningSummaries,
   splitExportWarnings,
 } from "./export-bundle.js";
-import { publishToHtmlApp } from "./html-app.js";
-import { clientHost, defaultPort, ensureStateDir, hostForUrl, serverLogFile, stateFile } from "./paths.js";
+import {
+  createUnpublishedPageHtml,
+  hostRejectedShareWrite,
+  normalizeSiteId,
+  publishedDespiteError,
+  publishToHtmlApp,
+  updateHtmlApp,
+} from "./html-app.js";
+import {
+  clientHost,
+  defaultPort,
+  ensureStateDir,
+  hostForUrl,
+  LOOPBACK_HOST,
+  serverLogFile,
+  stateFile,
+} from "./paths.js";
 import {
   computeVsCodePluginLocationsUpdate,
   linkCursorLocalPlugin,
@@ -28,10 +53,13 @@ import {
   writeTextFileAtomically,
 } from "./plugin.js";
 import { findPlaybook, listPlaybooks, playbookIds, PLAYBOOK_ROUTER_HELP } from "./playbooks.js";
+import { analyzeSelfPaint, SELF_PAINT_WARNING } from "./self-paint.js";
 import { resolveDesignAssetPath, serve } from "./server.js";
 import { canonicalFile, sessionKey, SessionStore } from "./session-store.js";
+import { generateSharePassword } from "./share-password.js";
 import { initDefaultTelemetry } from "./telemetry.js";
 
+const SHARE_VALUE_FLAGS = ["--password", "--token", "--site", "--update-key"];
 const COMMANDS = new Set(["open", "poll", "end", "stop", "server", "playbook", "design", "setup", "export", "share"]);
 const SERVER_APP_IDS = new Set(["george-showroom", "lavish-axi"]);
 // SDK-reserved built-ins (e.g. `update`) must reach runAxiCli untouched; otherwise
@@ -50,6 +78,18 @@ export const POLL_WAKE_PATH_RULES = Object.freeze([
 ]);
 export const POLL_SEND_AND_END_RULE =
   "`Send & End` ends the session. Its final feedback is still delivered once. After that response, polling stops, and the agent must not reopen the session uninvited.";
+export const POLL_AGENT_REPLY_RULE =
+  "Keep the reply concise. Only when a longer reply is genuinely necessary, use Markdown structure - blank-line paragraphs, `- ` / `1. ` lists, `## ` headings - so it renders scannably instead of a wall of text, and pass that body with `--agent-reply-file <path>` (`-` reads stdin) so newlines survive quoting.";
+const POLL_AGENT_REPLY_HELP_POINTER =
+  "The Conversation panel's Markdown subset is in README's Feedback controls bullet.";
+const POLL_AGENT_REPLY_NEXT_POINTER =
+  "The Conversation panel's Markdown subset is in `george-showroom poll --help` and README.";
+const POLL_VALUE_FLAGS = ["--agent-reply", "--agent-reply-file", "--timeout-ms", "--owner"];
+const AGENT_REPLY_JSON_LIMIT_BYTES = 2 * 1024 * 1024;
+const AGENT_REPLY_JSON_ENVELOPE_BYTES = Buffer.byteLength(JSON.stringify({ agent_reply: "" }));
+const AGENT_REPLY_INPUT_LIMIT_BYTES = AGENT_REPLY_JSON_LIMIT_BYTES - AGENT_REPLY_JSON_ENVELOPE_BYTES;
+const AGENT_REPLY_LIMIT_LABEL = "2 MB JSON request limit";
+const POLL_STATE_HEADER = "lavish-poll-state";
 const CODEX_POLL_WAKE_PATH_GUIDANCE =
   "Codex detected: completed background tasks may not resume Codex automatically, so keep the poll attached to the active turn.";
 // Inlined at build time from package.json; falls back to reading package.json so source-run tests work.
@@ -63,6 +103,56 @@ export function detectInvokingAgent(env = process.env) {
 
 export function shouldNarratePollWaitTicks({ isTTY }) {
   return Boolean(isTTY);
+}
+
+export function herdrPollChimeEnabled(env = process.env) {
+  return env.HERDR_ENV === "1" && env.LAVISH_AXI_HERDR_CHIME === "1";
+}
+
+/**
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   runner?: (command: string, args: string[], options: { stdio: "ignore" }) => import("node:child_process").ChildProcess,
+ * }} [options]
+ */
+export function notifyHerdrPollReady({ env = process.env, runner = spawn } = {}) {
+  if (!herdrPollChimeEnabled(env)) return false;
+  try {
+    const child = runner(
+      "herdr",
+      [
+        "notification",
+        "show",
+        "Lavish review ready",
+        "--body",
+        "The artifact is open and Lavish is polling for your feedback.",
+        "--sound",
+        "request",
+      ],
+      { stdio: "ignore" },
+    );
+    const kill = () => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        return;
+      }
+    };
+    const timer = setTimeout(kill, 2_000);
+    timer.unref();
+    const cleanup = () => {
+      clearTimeout(timer);
+      process.off("exit", kill);
+    };
+    child.on("error", () => {});
+    child.once("close", cleanup);
+    process.once("exit", kill);
+    child.unref();
+    return true;
+  } catch {
+    // A desktop notification is optional and must never interrupt feedback delivery.
+    return false;
+  }
 }
 
 export function pollExecutionGuidance({ agent = "generic" } = {}) {
@@ -173,6 +263,7 @@ export function createHomeOutput({ bin, sessions, includeSessions = true, agent 
             status: session.status,
             url: session.url,
             pending_prompts: session.pending_prompts || 0,
+            listener: session.listener || "none",
           })),
         }
       : {}),
@@ -223,10 +314,22 @@ export function createPlaybookOutput(args) {
   return { playbook };
 }
 
-export function createOpenOutput({ file, url, status, agent = "generic" }) {
+export function createOpenOutput({
+  file,
+  url,
+  status,
+  agent = "generic",
+  selfPaintWarning = undefined,
+  networkWarning = undefined,
+}) {
+  const selfPaintPrefix = selfPaintWarning
+    ? `First fix the unpainted page surface flagged in self_paint_warning and save - George Showroom live-reloads the artifact automatically, so you do not need to re-run \`george-showroom ${file}\`. `
+    : "";
   return {
     session: { file, url, status },
-    next_step: `Do not respond to the user just yet. Now you must run \`george-showroom poll ${file}\`. This command long-polls until the user sends feedback or ends the session, and it stays silent the whole time - that is normal, never kill it. Layout issues the browser detects do not return this poll; they wait in the user's Layout issues inbox until the user queues them, then arrive as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use. ${pollExecutionGuidance({ agent })} After applying feedback, run \`george-showroom poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms to show your response in George Showroom and wait for more feedback. If the user ends the session, stop polling and do not reopen it by re-running \`george-showroom ${file}\` unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`george-showroom ${file} --reopen\`.`,
+    ...(networkWarning ? { network_warning: networkWarning } : {}),
+    ...(selfPaintWarning ? { self_paint_warning: selfPaintWarning } : {}),
+    next_step: `${selfPaintPrefix}Do not respond to the user just yet. Now you must run \`george-showroom poll ${file}\`. This command long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, and it stays silent the whole time - that is normal, never kill it. Layout issues the browser detects do not return this poll; they wait in the user's Layout issues inbox until the user queues them, then arrive as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use. ${pollExecutionGuidance({ agent })} After applying feedback, run \`george-showroom poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms to show a concise response in George Showroom and wait for more feedback. ${POLL_AGENT_REPLY_RULE} ${POLL_AGENT_REPLY_NEXT_POINTER} If the user ends the session, stop polling and do not reopen it by re-running \`george-showroom ${file}\` unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`george-showroom ${file} --reopen\`.`,
   };
 }
 
@@ -234,9 +337,10 @@ export function createOpenOutput({ file, url, status, agent = "generic" }) {
 // browser. Reviving it silently would reopen a browser window the human deliberately closed, so
 // this refuses and requires the explicit --reopen opt-in instead of erroring - the session
 // staying closed is the correct, idempotent outcome unless the agent has a real reason to reopen.
-export function createUserEndedOpenOutput({ file, url }) {
+export function createUserEndedOpenOutput({ file, url, networkWarning = undefined }) {
   return {
     session: { file, url, status: "user-ended" },
+    ...(networkWarning ? { network_warning: networkWarning } : {}),
     next_step: `The user explicitly ended this George Showroom session from the browser, so \`george-showroom ${file}\` did not reopen it. Do not reopen unless the user asks for further review or something genuinely important needs their visual attention - deliver routine updates directly in this conversation instead. When reopening is warranted, run \`george-showroom ${file} --reopen\`.`,
   };
 }
@@ -248,12 +352,20 @@ async function openCommand(args) {
   }
   await assertHtmlFile(file);
   const absolute = await canonicalFile(file);
+  const selfPaintWarning = await selfPaintWarningForFile(absolute);
   const noGate = args.includes("--no-gate");
   const reopen = args.includes("--reopen");
-  const baseUrl = await ensureServer({ forceRestart: shouldForceRestartForLocalBuild(process.argv[1] || "") });
+  const baseUrl = await ensureServer({
+    forceRestart: shouldForceRestartForLocalBuild(process.argv[1] || ""),
+    reloadKey: sessionKey(absolute),
+  });
   const response = await postJson(`${baseUrl}/api/sessions`, { file: absolute, noGate, reopen });
   if (response.status === "user-ended") {
-    return createUserEndedOpenOutput({ file: absolute, url: response.url });
+    return createUserEndedOpenOutput({
+      file: absolute,
+      url: response.url,
+      networkWarning: response.network_warning,
+    });
   }
   if (shouldOpenBrowser(args, process.env)) {
     try {
@@ -268,7 +380,19 @@ async function openCommand(args) {
     url: response.url,
     status: response.status || "opened",
     agent: detectInvokingAgent(process.env),
+    selfPaintWarning,
+    networkWarning: response.network_warning,
   });
+}
+
+// A read failure here must not break the open - the server reports unreadable artifacts
+// through its own fatal path, and the self-paint check always fails open.
+async function selfPaintWarningForFile(absolute) {
+  try {
+    return analyzeSelfPaint(await readFile(absolute, "utf8")).painted ? undefined : SELF_PAINT_WARNING;
+  } catch {
+    return undefined;
+  }
 }
 
 export function shouldOpenBrowser(args, env) {
@@ -276,18 +400,28 @@ export function shouldOpenBrowser(args, env) {
 }
 
 async function pollCommand(args) {
-  const file = firstPositionalArg(args, ["--agent-reply", "--timeout-ms"]);
+  const file = firstPositionalArg(args, POLL_VALUE_FLAGS);
   if (!file) {
     throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `george-showroom poll <html-file>`"]);
   }
+  const ownerFlag = inspectValueFlag(args, "--owner");
+  const owner = ownerFlag.present ? String(ownerFlag.value || "").trim() : null;
+  if (ownerFlag.present && (!owner || owner.startsWith("-") || owner.toLowerCase() === "none")) {
+    throw new AxiError(
+      owner?.toLowerCase() === "none" ? "--owner none is reserved" : "--owner requires a non-empty label",
+      "VALIDATION_ERROR",
+      ["Pass `--owner <label>` to identify the process listening for feedback"],
+    );
+  }
+  const takeover = args.includes("--takeover");
+  const agentReply = await resolveAgentReply(args);
   const absolute = await canonicalFile(file);
   const baseUrl = await ensureServer();
-  const agentReply = flagValue(args, "--agent-reply");
-  if (agentReply) {
-    await postJson(`${baseUrl}/api/${sessionKey(absolute)}/agent-reply`, { text: agentReply });
-  }
   const timeoutMs = flagValue(args, "--timeout-ms");
-  const timeoutQuery = timeoutMs ? `&timeoutMs=${encodeURIComponent(timeoutMs)}` : "";
+  const query = new URLSearchParams({ file: absolute });
+  if (timeoutMs) query.set("timeoutMs", timeoutMs);
+  if (owner) query.set("owner", owner);
+  if (takeover) query.set("takeover", "1");
   // The indefinite poll looks hung from the agent's side (stdout stays empty until the user
   // acts), so narrate the wait on stderr and leave re-run guidance behind if the agent's
   // harness kills the process anyway. stderr keeps the stdout JSON contract intact.
@@ -312,10 +446,28 @@ async function pollCommand(args) {
         narrateTicks: shouldNarratePollWaitTicks({ isTTY: process.stderr.isTTY }),
       });
   try {
-    const response = await fetchJson(`${baseUrl}/api/poll?file=${encodeURIComponent(absolute)}${timeoutQuery}`, {
-      retries: 3,
-      retryDelayMs: 500,
+    const request =
+      agentReply || takeover
+        ? {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(agentReply ? { agent_reply: agentReply } : {}),
+          }
+        : {};
+    const response = await fetchJson(`${baseUrl}/api/poll?${query}`, {
+      ...request,
+      // Poll ownership is claimed before the response is available. Retrying a transport failure
+      // can leave the first claim alive and make the retry reject itself as LISTENER_ACTIVE.
+      retries: 0,
+      onResponse: (pollResponse) => {
+        if (pollResponse.headers.get(POLL_STATE_HEADER) === "listening") notifyHerdrPollReady();
+      },
     });
+    if (response.code === "LISTENER_REPLACED") {
+      throw new AxiError("Lavish Editor poll listener was replaced by a takeover", "LISTENER_REPLACED", [
+        `Re-run lavish-axi poll ${absolute} only if you intend to take over listening`,
+      ]);
+    }
     return createPollOutput({ file: absolute, response, agent: detectInvokingAgent(process.env) });
   } finally {
     waitReporter?.stop();
@@ -368,10 +520,10 @@ export function startPollWaitReporter({
 /**
  * @returns {{
  *   session: { file: string, status: string, session_ended?: boolean, ended_by?: string },
- *   next_step?: string,
- *   dom_snapshot?: string,
  *   prompts?: any[],
  *   artifact_failures?: any[],
+ *   next_step?: string,
+ *   dom_snapshot?: string,
  * }}
  */
 export function createPollOutput({ file, response, agent = "generic" }) {
@@ -390,16 +542,23 @@ export function createPollOutput({ file, response, agent = "generic" }) {
         status: "feedback",
         ...(sessionEnded ? { session_ended: true, ...(endedBy ? { ended_by: endedBy } : {}) } : {}),
       },
-      dom_snapshot: response.dom_snapshot || "",
       prompts: response.prompts || [],
       ...(artifactFailures.length > 0 ? { artifact_failures: artifactFailures } : {}),
       next_step: createFeedbackNextStep(file, artifactFailures, sessionEnded, endedBy, response.prompts || [], agent),
+      dom_snapshot: response.dom_snapshot || "",
     };
   }
   if (response.status === "ended") {
     return {
       session: { file, status: "ended", ...(response.ended_by ? { ended_by: response.ended_by } : {}) },
       next_step: createEndedNextStep(file, response.ended_by),
+    };
+  }
+  if (response.status === "browser_disconnected") {
+    return {
+      session: { file, status: "browser_disconnected" },
+      next_step:
+        "The Lavish review window was closed or disconnected. The session remains open and resumable; ask the user whether they want to reopen it or end the session. Do not reopen or end it without their direction.",
     };
   }
   return {
@@ -416,6 +575,9 @@ function createFeedbackNextStep(file, artifactFailures, sessionEnded, endedBy, p
   const layoutNote = prompts.some((prompt) => prompt && prompt.tag === "layout-warnings")
     ? `This feedback includes layout issues the user selected from the George Showroom Layout issues inbox (tag "layout-warnings"): the target lists the exact warning ids and targets. Apply every listed fix in one pass before saving so the user's review refreshes once. Queueing is a repair request, not a resolution - George Showroom only marks a warning resolved after a newer artifact load and a complete check at the same viewport no longer detects it. `
     : "";
+  const attachmentNote = prompts.some((prompt) => Array.isArray(prompt?.attachments) && prompt.attachments.length)
+    ? `Some prompts carry image attachments the user added: each is an object in the prompt's \`attachments\` array with an absolute local \`path\` (plus id, mime, and dimensions). Open those image files to see what the user is referring to. `
+    : "";
   if (sessionEnded) {
     const failureNote =
       count > 0
@@ -428,13 +590,13 @@ function createFeedbackNextStep(file, artifactFailures, sessionEnded, endedBy, p
         count > 0
           ? ""
           : ` Only run \`george-showroom ${file} --reopen\` if the user explicitly asks for further review or something genuinely important needs their visual attention.`;
-      return `${failureNote}${layoutNote}${whiteboardNote}This was the last feedback before the user ended the session. Stop polling ${file} and do not reopen it - deliver any remaining updates directly in this conversation instead.${reopenNote}`;
+      return `${failureNote}${layoutNote}${whiteboardNote}${attachmentNote}This was the last feedback before the user ended the session. Stop polling ${file} and do not reopen it - deliver any remaining updates directly in this conversation instead.${reopenNote}`;
     }
-    return `${failureNote}${layoutNote}${whiteboardNote}This was the last feedback before the George Showroom session ended. Stop polling ${file}. Deliver any remaining updates directly in this conversation, or run \`george-showroom ${file}\` to open a fresh session if the user needs further visual review.`;
+    return `${failureNote}${layoutNote}${whiteboardNote}${attachmentNote}This was the last feedback before the George Showroom session ended. Stop polling ${file}. Deliver any remaining updates directly in this conversation, or run \`george-showroom ${file}\` to open a fresh session if the user needs further visual review.`;
   }
   const prefix =
     count > 0 ? artifactFailuresPrefix(file, artifactFailures) : `Apply the requested changes to ${file}. `;
-  return `${prefix}${layoutNote}${whiteboardNote}Do not respond to the user just yet. Now you must run \`george-showroom poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms unless the user ended the session. The poll waits silently until the user sends more feedback or ends the session - never kill it. ${pollExecutionGuidance({ agent })}`;
+  return `${prefix}${layoutNote}${whiteboardNote}${attachmentNote}Do not respond to the user just yet. Now you must run \`george-showroom poll ${file} --agent-reply "<message for the user>"\` without --timeout-ms unless the user ended the session. ${POLL_AGENT_REPLY_RULE} ${POLL_AGENT_REPLY_NEXT_POINTER} The poll waits silently until the user sends more feedback, ends the session, or leaves every review window disconnected past the reconnect grace period - never kill it. ${pollExecutionGuidance({ agent })}`;
 }
 
 // The narrow fatal path. Ordinary layout findings never reach the poll: they wait in the user's
@@ -488,10 +650,16 @@ async function exportCommand(args) {
     resolveAbsolute: resolveDesignAssetPath,
   });
   await writeFile(output, html);
-  return createExportOutput({ source: absolute, output, html, warnings });
+  return createExportOutput({
+    source: absolute,
+    output,
+    html,
+    warnings,
+    selfPaintWarning: analyzeSelfPaint(source).painted ? undefined : SELF_PAINT_WARNING,
+  });
 }
 
-export function createExportOutput({ source, output, html, warnings }) {
+export function createExportOutput({ source, output, html, warnings, selfPaintWarning = undefined }) {
   const allWarnings = Array.isArray(warnings) ? warnings : [];
   const { unresolved, notices } = splitExportWarnings(allWarnings);
   const result = {
@@ -514,6 +682,10 @@ export function createExportOutput({ source, output, html, warnings }) {
   } else {
     result.next_step = `Wrote ${output}. Open it directly or host it anywhere - it needs no George Showroom server. Local assets are inlined; remote CDN/font references are left as links, so it needs network to render those.`;
   }
+  if (selfPaintWarning) {
+    result.self_paint_warning = selfPaintWarning;
+    result.next_step = `Fix the unpainted page surface flagged in self_paint_warning and re-run the export before sharing the file - an exported page renders over whatever surface hosts it. ${result.next_step}`;
+  }
   return result;
 }
 
@@ -521,20 +693,21 @@ function assetWarningSummaries(warnings) {
   return exportWarningSummaries(warnings);
 }
 
-// Publish the artifact as a visitable page on third-party ht-ml.app. Builds the same local-inlined
-// HTML as `export` (remote refs left as links), then POSTs it to ht-ml.app's `/v1/sites` API,
-// sending the artifact to ht-ml.app's servers. The service is not part of George Showroom, needs no
-// account or API key, and returns the share URL plus the secret update_key for
-// managing the page later. Server-independent.
-async function shareCommand(args) {
-  const file = firstPositionalArg(args, ["--password", "--token"]);
-  if (!file) {
-    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `george-showroom share <html-file>`"]);
+// Publish, republish, or unpublish a page on third-party ht-ml.app; `resolveShareRequest` owns
+// which of the three the arguments describe. Creating POSTs the local-inlined HTML - built the same
+// way as `export`, remote refs left as links - to `/v1/sites`, needs no account or API key, and
+// returns the share URL plus the secret update_key. Republishing and unpublishing instead PUT to
+// `/v1/sites/{site_id}` authorized by that update_key and mint no new one; unpublish reads no file
+// at all and sends a placeholder page. Server-independent.
+export async function shareCommand(args) {
+  const request = resolveShareRequest(args);
+  if (request.mode === "unpublish") {
+    const site = await unpublishShareSite(request);
+    return createShareUnpublishOutput({ site, siteId: request.siteId });
   }
-  await assertHtmlFile(file);
-  const absolute = await canonicalFile(file);
-  const password = optionalFlagString(flagValue(args, "--password"));
-  const token = optionalFlagString(flagValue(args, "--token"));
+
+  await assertHtmlFile(request.file);
+  const absolute = await canonicalFile(request.file);
   const root = path.dirname(absolute);
   const source = await readFile(absolute, "utf8");
   const { html, warnings } = await buildSelfContainedHtml(source, {
@@ -542,24 +715,357 @@ async function shareCommand(args) {
     confineDir: root,
     resolveAbsolute: resolveDesignAssetPath,
   });
-  const site = await publishToHtmlApp(html, { password, token });
-  return createShareOutput({ source: absolute, site, warnings, passwordProtected: Boolean(password) });
+  const selfPaintWarning = analyzeSelfPaint(source).painted ? undefined : SELF_PAINT_WARNING;
+
+  if (request.mode === "update") {
+    const site = await updateShareSite(request, html);
+    return createShareUpdateOutput({
+      source: absolute,
+      site,
+      warnings,
+      password: request.generatedPassword ? request.password : undefined,
+      passwordProtected: Boolean(request.password),
+      selfPaintWarning,
+    });
+  }
+
+  const site = await createShareSite(request, html);
+  return createShareOutput({
+    source: absolute,
+    site,
+    warnings,
+    passwordProtected: Boolean(request.password),
+    password: request.generatedPassword ? request.password : undefined,
+    selfPaintWarning,
+  });
 }
 
-export function createShareOutput({ source, site, warnings, passwordProtected = false }) {
+// Every surface that tells the user how to republish prints this one command, because a hint the
+// CLI itself rejects is worse than no hint: `--site`/`--update-key` alone parse to a usage error,
+// and the HTML file positional is what makes the shape a command that runs.
+//
+// A suggested command may never carry a password PLACEHOLDER. Every other placeholder here fails
+// loudly when an agent substitutes the real values and leaves one literal - `<html-file>` is not a
+// file, `<key>` earns a 401 - but any non-empty string is a valid password, so a literal `<pw>`
+// would be accepted and would rotate a live page to a secret nobody was told, with no way to clear
+// it afterwards. `--private` is safe to name because it takes no value and George Showroom reports what it
+// minted; an explicit password is described in words instead.
+function republishCommand(siteId, { privatePage = false } = {}) {
+  return `george-showroom share <html-file> --site ${siteId} --update-key <key>${privatePage ? " --private" : ""}`;
+}
+
+function republishPrivateCommand(siteId) {
+  return republishCommand(siteId, { privatePage: true });
+}
+
+function unpublishCommand(siteId) {
+  return `george-showroom share --unpublish --site ${siteId} --update-key <key>`;
+}
+
+// A 200 the host answered with an unreadable body is not an unknown outcome - the page landed - and
+// hedging it away discards the strongest honest report available. Whatever fields did arrive are
+// handed over, because a url with no update_key names a live page whose write credential is gone.
+function incompletePublishError(request, message, received) {
+  const url = String(received.url || "").trim();
+  const updateKey = String(received.updateKey || "").trim();
+  const siteId = String(received.siteId || "").trim();
+  const visibility = request.password
+    ? `behind the password this run sent`
+    : `PUBLICLY, readable by anyone who has the link`;
+  const suggestions = [
+    `ht-ml.app accepted this publish - the page IS live, hosted ${visibility} - but its response was malformed, so Lavish could not read the whole result back. Do not report this as a failed publish.`,
+    url
+      ? `Its address is ${url} - give the user that URL.`
+      : `The response carried no url, so Lavish cannot name the page's address.`,
+  ];
+  if (updateKey) {
+    suggestions.push(
+      `Its update_key is ${updateKey}${siteId ? ` and its site_id is ${siteId}` : ""} - keep it, because ht-ml.app issues one only once and it is the only credential for changing or unpublishing the page.`,
+    );
+  } else {
+    suggestions.push(
+      `No update_key reached Lavish, and ht-ml.app issues one only once and has no delete endpoint, so this page can never be republished or unpublished. There is no recovery for it.`,
+    );
+  }
+  suggestions.push(`Re-running this command publishes a SECOND page at a new URL; it does not replace the first.`);
+  if (request.generatedPassword && request.password) {
+    suggestions.push(`That page requires the password Lavish generated for it: ${request.password}`);
+  }
+  return new AxiError(message, "UNKNOWN", suggestions);
+}
+
+// Creating is the highest-consequence instance of the same split, because it is the one write with
+// no way back. A 4xx means nothing was published. Anything else can follow a POST the origin
+// already committed, and the response that was lost is the ONLY copy of the update_key - issued
+// once, and the sole credential for a host with no delete endpoint - so a page that landed this way
+// can never be republished or unpublished by anyone. Nothing here may suggest a recovery, because
+// there is none: re-running mints a second page rather than replacing the first.
+async function createShareSite(request, html) {
+  try {
+    return await publishToHtmlApp(html, { password: request.password, token: request.token });
+  } catch (error) {
+    if (hostRejectedShareWrite(error)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    const landed = publishedDespiteError(error);
+    if (landed) throw incompletePublishError(request, message, landed);
+    const hosting = request.password
+      ? `the artifact is now hosted on ht-ml.app behind the password this run sent`
+      : `the artifact is now hosted PUBLICLY on ht-ml.app, readable by anyone who has the link`;
+    const suggestions = [
+      `ht-ml.app may or may not have published this page, so treat the outcome as unknown.`,
+      `If it landed, ${hosting}, and the response carrying its url, site_id, and update_key was lost.`,
+      `An update_key is issued once and ht-ml.app has no delete endpoint, so such a page can never be republished or unpublished - there is no recovery for it. Tell the user rather than implying the publish simply failed.`,
+      `Re-running this command publishes a SECOND page at a new URL; it does not replace or reclaim the first.`,
+    ];
+    if (request.generatedPassword && request.password) {
+      suggestions.push(`If it landed, that page requires the password Lavish generated for it: ${request.password}`);
+    }
+    throw new AxiError(message, "UNKNOWN", suggestions);
+  }
+}
+
+// Whether the outcome is unknown is a property of the FAILURE, not of what the request carried: a
+// 4xx the host answered means it wrote nothing, while a 5xx or no answer at all can follow a PUT
+// the origin already committed, leaving the hosted page showing content Lavish reported as never
+// sent. So every indeterminate republish reports that and names a re-run that converges.
+// A generated password is an ADDITIONAL layer on that report, not its trigger: it only ever reaches
+// the user through the success output, so an indeterminate failure could otherwise leave the page
+// rotated to a secret nobody holds. A rejection must never carry it, because it gates nothing.
+async function updateShareSite(request, html) {
+  try {
+    return await updateHtmlApp(request.siteId, html, {
+      updateKey: request.updateKey,
+      password: request.password,
+    });
+  } catch (error) {
+    if (hostRejectedShareWrite(error)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    const generated = Boolean(request.generatedPassword && request.password);
+    const retry = generated ? republishPrivateCommand(request.siteId) : republishCommand(request.siteId);
+    const samePassword = !generated && request.password ? `, passing the same --password value you supplied` : "";
+    const suggestions = [
+      `ht-ml.app may or may not have applied this republish, so treat the outcome as unknown: the hosted page may already show the new content.`,
+      `Re-running \`${retry}\`${samePassword} is safe and converges on the same result either way.`,
+    ];
+    if (generated) {
+      suggestions.push(
+        `If it landed, the page now requires the password Lavish generated for it: ${request.password} - the re-run above rotates it to a fresh one Lavish reports on success.`,
+      );
+    }
+    throw new AxiError(message, "UNKNOWN", suggestions);
+  }
+}
+
+// ht-ml.app has no delete endpoint, so the closest honest thing is a republish: replace the content
+// and lock the URL behind a password nobody is given. The update_key is the way back. The same
+// indeterminate-outcome rule as a republish applies - a 5xx or a timeout can follow a PUT the
+// origin already committed - so reporting a flat failure would tell the user the page is still
+// readable when it may already be the locked placeholder. No password is offered here: the lock
+// password is discarded by design, so there is nothing recoverable to hand back.
+async function unpublishShareSite(request) {
+  try {
+    return await updateHtmlApp(request.siteId, createUnpublishedPageHtml(), {
+      updateKey: request.updateKey,
+      password: generateSharePassword(),
+    });
+  } catch (error) {
+    if (hostRejectedShareWrite(error)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new AxiError(message, "UNKNOWN", [
+      `ht-ml.app may or may not have applied this unpublish, so treat the outcome as unknown: the page may already be the locked placeholder.`,
+      `Re-running \`${unpublishCommand(request.siteId)}\` is safe and converges on the same result either way.`,
+      `The update_key still works, so \`${republishPrivateCommand(request.siteId)}\` brings the page back behind a password you can see.`,
+    ]);
+  }
+}
+
+// Resolve which of `share`'s three shapes the arguments describe - publish, republish, or
+// unpublish - and which password the host should be sent. Pure, so the conflict rules are
+// testable without a network call or a file on disk. A password is never accepted from the artifact
+// or the browser; this is the only place one is generated for a request, the sole exception being
+// `--unpublish`, which mints its own directly because that value is discarded rather than reported.
+export function resolveShareRequest(args) {
+  const unpublish = args.includes("--unpublish");
+  const generate = args.includes("--private");
+  const explicitPassword = shareFlagValue(args, "--password");
+  const siteId = shareFlagValue(args, "--site");
+  const updateKey = shareFlagValue(args, "--update-key");
+  const token = shareFlagValue(args, "--token");
+  const file = firstPositionalArg(args, SHARE_VALUE_FLAGS);
+
+  if (generate && explicitPassword) {
+    throw new AxiError("--private generates a password, so it cannot be combined with --password", "VALIDATION_ERROR", [
+      "Pass --private to have Lavish mint one, or --password <pw> to choose it yourself",
+    ]);
+  }
+  // A republish authenticates as the page itself: the Authorization header carries the update_key,
+  // so there is no room for a bearer token and silently accepting one would look like it applied.
+  if (token && (unpublish || siteId || updateKey)) {
+    throw new AxiError(
+      "--token only applies when creating a page: a republish authenticates with the update_key, which is what the Authorization header carries",
+      "VALIDATION_ERROR",
+      ["Drop --token and keep --site <site_id> --update-key <key>"],
+    );
+  }
+
+  if (unpublish) {
+    if (file) {
+      throw new AxiError("--unpublish replaces a published page and takes no HTML file", "VALIDATION_ERROR", [
+        "Run `george-showroom share --unpublish --site <site_id> --update-key <key>`",
+      ]);
+    }
+    if (generate || explicitPassword) {
+      throw new AxiError(
+        "--unpublish locks the page with its own password and takes no password flag",
+        "VALIDATION_ERROR",
+        ["Run `george-showroom share --unpublish --site <site_id> --update-key <key>`"],
+      );
+    }
+    assertSiteCredential(siteId, updateKey);
+    return {
+      mode: "unpublish",
+      file: null,
+      siteId: assertShareSiteId(siteId),
+      updateKey,
+      password: undefined,
+      generatedPassword: false,
+      token,
+    };
+  }
+
+  if (siteId || updateKey) {
+    assertSiteCredential(siteId, updateKey);
+    assertShareFile(file);
+    return {
+      mode: "update",
+      file,
+      siteId: assertShareSiteId(siteId),
+      updateKey,
+      ...resolveSharePassword({ generate, explicitPassword }),
+      token,
+    };
+  }
+
+  assertShareFile(file);
+  return {
+    mode: "create",
+    file,
+    siteId: null,
+    updateKey: null,
+    ...resolveSharePassword({ generate, explicitPassword }),
+    token,
+  };
+}
+
+// An absent password preserves whatever the page already has. There is no "clear" value: the host
+// accepts an empty password and ignores it, so offering one would report a page as public while it
+// is still gated.
+function resolveSharePassword({ generate, explicitPassword }) {
+  if (generate) return { password: generateSharePassword(), generatedPassword: true };
+  if (explicitPassword) return { password: explicitPassword, generatedPassword: false };
+  return { password: undefined, generatedPassword: false };
+}
+
+function assertSiteCredential(siteId, updateKey) {
+  if (!siteId) {
+    throw new AxiError("--site <site_id> is required to change a published page", "VALIDATION_ERROR", [
+      "The site_id is in the share output from when the page was published",
+    ]);
+  }
+  if (!updateKey) {
+    throw new AxiError("--update-key <key> is required to change a published page", "VALIDATION_ERROR", [
+      "The update_key was returned once when the page was published; there is no way to recover it",
+    ]);
+  }
+}
+
+// Read one of share's value-taking flags. `flagValue` takes the next token unconditionally, which
+// every other command tolerates because its blast radius is a bad argument; here an empty unquoted
+// shell variable makes `--password $PW --site abc` read "--site" as the password and ROTATE a live
+// page to a literal nobody knows, and the host cannot clear a password afterwards. So share refuses
+// the shapes that would be guesses rather than values. The `--password=<pw>` form stays permissive
+// past the leading `--` because nothing can be swallowed there.
+function shareFlagValue(args, flag) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--") break;
+    if (arg === flag) return checkedShareFlagValue(flag, args[i + 1], { swallows: true });
+    if (arg.startsWith(`${flag}=`)) return checkedShareFlagValue(flag, arg.slice(flag.length + 1), {});
+  }
+  return undefined;
+}
+
+function checkedShareFlagValue(flag, value, { swallows = false }) {
+  const hint =
+    flag === "--password"
+      ? `Quote the value as ${flag} "<pw>" - an unquoted shell variable that is unset expands to nothing - or pass --private to have Lavish generate one`
+      : `Quote the value as ${flag} "<value>"`;
+  if (swallows && typeof value === "string" && value.startsWith("--")) {
+    throw new AxiError(
+      `${flag} was given no value: the next argument ${value} is another flag, so it would have been used as the value`,
+      "VALIDATION_ERROR",
+      [hint, `Use ${flag}=<value> if the value itself starts with --`],
+    );
+  }
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) {
+    const consequence =
+      flag === "--password"
+        ? ", and publishing a PUBLIC page while you believed it was gated is the worse failure"
+        : "";
+    throw new AxiError(`${flag} was given an empty value${consequence}`, "VALIDATION_ERROR", [hint]);
+  }
+  return trimmed;
+}
+
+// normalizeSiteId is the library-level guard and throws a plain Error for direct callers. At the
+// CLI boundary a bad --site is a usage mistake like any other, and pasting the share URL is the
+// likeliest one, so it gets the same VALIDATION_ERROR shape and a hint about where the id comes
+// from - raised here rather than inside updateHtmlApp, which only runs after the whole artifact
+// has been read and bundled.
+function assertShareSiteId(siteId) {
+  try {
+    return normalizeSiteId(siteId);
+  } catch (error) {
+    throw new AxiError(error instanceof Error ? error.message : String(error), "VALIDATION_ERROR", [
+      "The site_id is in the share output from when the page was published, and in the browser publish dialog's Site ID row",
+    ]);
+  }
+}
+
+function assertShareFile(file) {
+  if (!file) {
+    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `george-showroom share <html-file>`"]);
+  }
+}
+
+export function createShareOutput({
+  source,
+  site,
+  warnings,
+  passwordProtected = false,
+  password = undefined,
+  selfPaintWarning = undefined,
+}) {
   const allWarnings = Array.isArray(warnings) ? warnings : [];
   const { unresolved, notices } = splitExportWarnings(allWarnings);
   const isPasswordProtected = Boolean(passwordProtected);
+  // The host either returned no site_id or returned one `normalizeSiteId` refuses, which is the
+  // same thing for the user: `--site` is half the republish credential, so without a usable one
+  // the page can never be changed again even though its update_key is in hand. Emitting an empty
+  // string beside guidance that says to keep it would hide that until `--site` rejected it.
+  const republishableSiteId = String(site.site_id ?? "").trim();
   const result = {
     share: {
       source,
       url: site.url,
-      site_id: site.site_id,
+      ...(republishableSiteId ? { site_id: republishableSiteId } : {}),
       update_key: site.update_key,
       status: site.status || "active",
       public: !isPasswordProtected,
       visibility: isPasswordProtected ? "private" : "public",
       password_protected: isPasswordProtected,
+      ...(password ? { password } : {}),
       unresolved_local_assets: unresolved.length,
       notices: notices.length,
     },
@@ -571,33 +1077,131 @@ export function createShareOutput({ source, site, warnings, passwordProtected = 
   const noticeNote = notices.length ? " Export notices are available in notices." : "";
   const hostNote =
     "ht-ml.app (https://ht-ml.app), a third-party host not part of George Showroom, hosts the page, so it needs no George Showroom server.";
+  const updateKeyNote = republishableSiteId
+    ? "The update_key is a secret shown only once; keep it to republish the page later with --site and --update-key (there is no recovery, and ht-ml.app has no delete). "
+    : "The host did not return a site_id George Showroom can use, and --site is half the republish credential, so this page can NEVER be republished or unpublished even though its update_key is in hand. Tell the user that now rather than letting them discover it later. ";
   if (unresolved.length) {
     result.next_step =
       `Published ${isPasswordProtected ? "a PASSWORD-PROTECTED page at " : ""}${site.url}, but some LOCAL assets could not be inlined and were left as references (see unresolved_local_assets); inspect the hosted page and fix missing local assets before sharing it.${passwordNote}${noticeNote} ` +
       `Remote CDN/font references are intentionally left as links and render where there is network access. ` +
-      `The update_key is a secret shown only once; keep it to update or delete the page later (there is no recovery). ` +
+      updateKeyNote +
       hostNote;
   } else if (isPasswordProtected) {
     result.next_step =
       `Published a PASSWORD-PROTECTED page: ${site.url} - share this URL with the user and provide the password separately; viewers also need the password. ` +
       `${noticeNote ? `${noticeNote} ` : ""}` +
-      `The update_key is a secret shown only once; keep it to update or delete the page later (there is no recovery). ` +
+      updateKeyNote +
       hostNote;
   } else {
     result.next_step =
       `Published a PUBLIC page that anyone with the link can view: ${site.url} - share this URL with the user. ` +
       `${noticeNote ? `${noticeNote} ` : ""}` +
-      `The update_key is a secret shown only once; keep it to update or delete the page later (there is no recovery). ` +
+      updateKeyNote +
       hostNote;
   }
+  if (password) result.next_step = `${generatedPasswordNote(password)} ${result.next_step}`;
+  if (selfPaintWarning) {
+    result.self_paint_warning = selfPaintWarning;
+    result.next_step = `Fix the unpainted page surface flagged in self_paint_warning, then re-run the share command and share only its replacement URL - the hosted page renders over ht-ml.app's own surface. ${result.next_step}`;
+  }
   return result;
+}
+
+// Republish output. Visibility is "unchanged" unless this call set a password, because George Showroom
+// persists nothing about a published page and the host never reports its current password. So a
+// plain republish reports what George Showroom DID, never what the page IS: it cannot know whether the page
+// is gated, and an authoritative guess either way is one the user would act on.
+export function createShareUpdateOutput({
+  source,
+  site,
+  warnings,
+  password = undefined,
+  passwordProtected = false,
+  selfPaintWarning = undefined,
+}) {
+  const allWarnings = Array.isArray(warnings) ? warnings : [];
+  const { unresolved, notices } = splitExportWarnings(allWarnings);
+  const visibility = passwordProtected ? "private" : "unchanged";
+  const url = String(site.url ?? "").trim();
+  const result = {
+    share: {
+      source,
+      url,
+      site_id: site.site_id,
+      status: site.status || "active",
+      updated: true,
+      visibility,
+      ...(password ? { password } : {}),
+      unresolved_local_assets: unresolved.length,
+      notices: notices.length,
+    },
+  };
+  if (allWarnings.length) result.warnings = exportWarningSummaries(allWarnings);
+  if (unresolved.length) result.unresolved_local_assets = assetWarningSummaries(unresolved);
+  if (notices.length) result.notices = assetWarningSummaries(notices);
+  const noticeNote = notices.length ? " Export notices are available in notices." : "";
+  const unresolvedNote = unresolved.length
+    ? " Some LOCAL assets could not be inlined and were left as references (see unresolved_local_assets); inspect the hosted page."
+    : "";
+  const visibilityNote =
+    visibility === "private"
+      ? " It is PASSWORD-PROTECTED; viewers also need the password. That gate is NOT instant: if the page had been public, it was observed still answering uncredentialed requests from ht-ml.app's CDN cache for minutes afterwards, so do not tell the user it is gated right away; a page that was already private has no such cached copy and leaks nothing."
+      : " This republish did not touch the page's password, so whatever it had when it was last published still applies. George Showroom stores nothing about a published page, so this output cannot tell you whether that is a password or none - and a page published without one stays readable by anyone who has the link.";
+  result.next_step = url
+    ? `Republished ${source} to the same URL: ${url} - viewers see the new version immediately and no new link is needed.${visibilityNote}${unresolvedNote}${noticeNote} ` +
+      `Keep the same update_key; it is still the only credential for this page.`
+    : `Republished ${source} in place as site_id ${site.site_id} - viewers see the new version immediately and no new link is needed, but the host did not report a URL for the page, so use the one from when it was published rather than guessing.${visibilityNote}${unresolvedNote}${noticeNote} ` +
+      `Keep the same update_key; it is still the only credential for this page.`;
+  if (password) result.next_step = `${generatedPasswordNote(password)} ${result.next_step}`;
+  if (selfPaintWarning) {
+    result.self_paint_warning = selfPaintWarning;
+    result.next_step = `Fix the unpainted page surface flagged in self_paint_warning, then republish - the hosted page renders over ht-ml.app's own surface. ${result.next_step}`;
+  }
+  return result;
+}
+
+// Unpublish output. The page is replaced and locked, never removed, and saying otherwise would
+// leave the user believing content is gone from a URL that still resolves.
+// `siteId` is the locally validated id the request was addressed to, and it - never the host's
+// echo - is what the suggested republish command interpolates: that string is text an agent may
+// run, so a host answering with `abc123 --password evil` must not be able to append flags to it.
+export function createShareUnpublishOutput({ site, siteId = undefined }) {
+  const url = String(site.url ?? "").trim();
+  const commandSiteId = siteId || site.site_id;
+  const target = url
+    ? `Replaced the page at ${url} with an "unpublished" placeholder`
+    : `Replaced the page published as site_id ${site.site_id} with an "unpublished" placeholder (the host did not report a URL for it, so use the one from when it was published rather than guessing)`;
+  return {
+    share: {
+      url,
+      site_id: site.site_id,
+      status: site.status || "active",
+      unpublished: true,
+      visibility: "private",
+    },
+    next_step:
+      `${target} and locked it behind a fresh random password that was discarded. The replacement itself is immediate: the previous content is gone from that URL, not merely hidden. ` +
+      `The LOCK is what is not instant for a page that was public - its CDN copy was observed serving the new placeholder to uncredentialed requests for minutes afterwards - so the placeholder may be readable without the password until the edge cache turns over. Do not tell the user the URL is unreachable right away. ` +
+      `ht-ml.app has NO delete endpoint: the page is not deleted, the URL still resolves, and the host still holds whatever was published. Tell the user that rather than saying it was deleted. ` +
+      `The update_key is still the only credential for this page - republish with \`${republishPrivateCommand(commandSiteId)}\` to bring it back, then give the user the new password it returns. ` +
+      `ht-ml.app cannot remove a page's password once it has one, so a republished page stays private.`,
+  };
+}
+
+function generatedPasswordNote(password) {
+  return (
+    `The password is ${password} - George Showroom generated it and does not store it anywhere. ` +
+    `Give it to the user with the URL and tell them it is a SHARED SECRET: anyone they pass it to can read the page.`
+  );
 }
 
 // Explicitly shut down the running George Showroom server. Unlike `end` (which closes a single
 // session), this stops the background process so it stops dangling between sessions.
 export async function stopCommand(args) {
   const port = Number(flagValue(args, "--port") || defaultPort());
-  const baseUrl = `http://${hostForUrl(clientHost())}:${port}`;
+  // A server that fell back to loopback answers there rather than at the requested bind host, and
+  // a `stop` that only dials the requested host reports "not-running" while leaving it running.
+  const { baseUrl } = await findRunningServer(port);
   return shutdownServerOnPort(port, { baseUrl, currentVersion: VERSION });
 }
 
@@ -620,7 +1224,7 @@ export async function shutdownServerOnPort(
   if (!(await canControlServerOnPort(port, health, processMatchesLavish))) {
     return { server: { status: "not-lavish", port } };
   }
-  await shutdownRequester(baseUrl);
+  await shutdownRequester(baseUrl, { reason: "stop" });
   let freed = await portFreeWaiter(baseUrl, 3000);
   if (!freed && shouldKillProcessOnPort(currentVersion, health)) {
     portKiller(port);
@@ -1179,7 +1783,16 @@ async function serverCommand(args) {
 
 async function visibleSessions() {
   const store = new SessionStore(stateFile());
-  return (await store.listSessions()).filter((session) => session.status !== "ended");
+  const sessions = (await store.listSessions()).filter((session) => session.status !== "ended");
+  const { health } = await findRunningServer(defaultPort());
+  const listeners = new Map(
+    Array.isArray(health?.listeners)
+      ? health.listeners
+          .filter((listener) => listener && typeof listener.key === "string")
+          .map((listener) => [listener.key, listener.label || "agent-listener"])
+      : [],
+  );
+  return sessions.map((session) => ({ ...session, listener: listeners.get(session.key) || "none" }));
 }
 
 async function assertHtmlFile(file) {
@@ -1201,10 +1814,57 @@ function isHtmlPath(file) {
   return file.toLowerCase().endsWith(".html") || file.toLowerCase().endsWith(".htm");
 }
 
-async function ensureServer({ forceRestart = false } = {}) {
+// A server that could not bind its requested address falls back to loopback (see `serve()`), so
+// the control channel has to look there too. Without this the CLI reports "did not start" for a
+// server that IS running, and the next invocation spawns a duplicate daemon beside it.
+function serverBaseUrls(port) {
+  const urls = [`http://${hostForUrl(clientHost())}:${port}`];
+  const loopback = `http://${hostForUrl(LOOPBACK_HOST)}:${port}`;
+  if (!urls.includes(loopback)) urls.push(loopback);
+  return urls;
+}
+
+const HEALTH_PROBE_TIMEOUT_MS = 500;
+
+// Returns where a Lavish server actually answered. Each candidate probe is bounded so a hanging
+// requested address cannot mask loopback, and a response whose app is lavish-axi wins over a
+// foreign /health. When nothing answers, the primary URL is still returned so callers have
+// something to spawn against and report.
+async function findRunningServer(port, { reconcileNetwork = false } = {}) {
+  const candidates = serverBaseUrls(port);
+  let foreign = null;
+  for (const baseUrl of candidates) {
+    const health = await probeHealth(baseUrl, { reconcileNetwork, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+    if (!health) continue;
+    if (SERVER_APP_IDS.has(health.app)) return { baseUrl, health };
+    if (!foreign) foreign = { baseUrl, health };
+  }
+  return foreign ?? { baseUrl: candidates[0], health: null };
+}
+
+async function probeHealth(baseUrl, { reconcileNetwork, timeoutMs }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const health = await Promise.race([
+      Promise.resolve()
+        .then(() => fetchHealth(baseUrl, { reconcileNetwork, timeoutMs, signal: controller.signal }))
+        .catch(() => null),
+      new Promise((resolve) => {
+        controller.signal.addEventListener("abort", () => resolve(null), { once: true });
+      }),
+    ]);
+    return health && typeof health === "object" ? health : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// `reloadKey` names the session this invocation is about to open. A version-driven replacement
+// reloads that chrome only; every other open review page is told it is outdated and left alone.
+async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   const port = defaultPort();
-  const baseUrl = `http://${hostForUrl(clientHost())}:${port}`;
-  const existing = await fetchHealth(baseUrl);
+  const { baseUrl, health: existing } = await findRunningServer(port, { reconcileNetwork: true });
   if (existing && !shouldRestartServer(VERSION, existing, forceRestart)) {
     return baseUrl;
   }
@@ -1216,7 +1876,7 @@ async function ensureServer({ forceRestart = false } = {}) {
     }
     // Stale server from an older release is squatting on the port. Ask it to shut down
     // gracefully so the upgraded client doesn't keep handing users an old chrome.
-    await requestShutdown(baseUrl);
+    await requestShutdown(baseUrl, { reloadKey, reason: serverReplacementReason(VERSION, existing, forceRestart) });
     const freed = await waitForPortFree(baseUrl, 2000);
     if (!freed) {
       // Pre-handshake servers (any release older than this change) don't expose /shutdown
@@ -1229,11 +1889,26 @@ async function ensureServer({ forceRestart = false } = {}) {
     }
   }
   await startServer(port);
-  const deadline = Date.now() + 5000;
+  const replacedForNetwork =
+    Boolean(existing) &&
+    existing.app === "lavish-axi" &&
+    existing.network_stale === true &&
+    !forceRestart &&
+    typeof existing.version === "string" &&
+    existing.version === VERSION;
+  let networkRestarted = replacedForNetwork;
+  let deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
-    const health = await fetchHealth(baseUrl);
-    if (health && !shouldRestartServer(VERSION, health)) {
-      return baseUrl;
+    const { baseUrl: liveUrl, health } = await findRunningServer(port, { reconcileNetwork: true });
+    if (health && !shouldRestartServer(VERSION, health)) return liveUrl;
+    if (health?.network_stale === true && health.app === "lavish-axi") {
+      if (networkRestarted) return liveUrl;
+      await requestShutdown(liveUrl, { reloadKey, reason: "" });
+      if (!(await waitForPortFree(liveUrl, 3000))) break;
+      await startServer(port);
+      networkRestarted = true;
+      deadline = Date.now() + 5000;
+      continue;
     }
     await delay(100);
   }
@@ -1252,8 +1927,21 @@ export function shouldRestartServer(currentVersion, healthBody, forceRestart = f
   // A same-version upstream Lavish process still serves the upstream product chrome.
   // Replace it once so the primary George Showroom invocation is visibly ours.
   if (healthBody.app === "lavish-axi") return true;
+  if (healthBody.network_stale === true && healthBody.app === "lavish-axi") return true;
   if (typeof healthBody.version !== "string" || healthBody.version === "") return true;
   return healthBody.version !== currentVersion;
+}
+
+// Which branch of `shouldRestartServer` actually fired, because that is what the other open
+// review pages are told. A local-build force replaces a server of the SAME version, so calling it
+// an upgrade would be false on both counts; only a version this CLI does not match is one.
+export function serverReplacementReason(currentVersion, healthBody, forceRestart = false) {
+  if (!shouldRestartServer(currentVersion, healthBody, forceRestart)) return "";
+  const runningVersion = healthBody.version;
+  if (typeof runningVersion !== "string" || runningVersion === "" || runningVersion !== currentVersion) {
+    return "upgrade";
+  }
+  return forceRestart ? "local-build" : "";
 }
 
 export function shouldForceRestartForLocalBuild(executablePath, sourceServerExists = localSourceServerExists()) {
@@ -1280,9 +1968,15 @@ async function canControlServerOnPort(port, healthBody, processMatchesLavish) {
   return processMatchesLavish(port);
 }
 
-async function fetchHealth(baseUrl) {
+/**
+ * @param {string} baseUrl
+ * @param {{ reconcileNetwork?: boolean, timeoutMs?: number, signal?: AbortSignal }} [options]
+ */
+async function fetchHealth(baseUrl, { reconcileNetwork = false, timeoutMs, signal } = {}) {
   try {
-    const response = await fetch(`${baseUrl}/health`);
+    const suffix = reconcileNetwork ? "?reconcile_network=1" : "";
+    const abortSignal = signal ?? (timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined);
+    const response = await fetch(`${baseUrl}/health${suffix}`, abortSignal ? { signal: abortSignal } : {});
     if (!response.ok) return null;
     return await response.json();
   } catch {
@@ -1290,9 +1984,18 @@ async function fetchHealth(baseUrl) {
   }
 }
 
-async function requestShutdown(baseUrl) {
+// `reason` is what every other open review page is told: this CLI has exactly two callers, and
+// each knows which of them it is.
+async function requestShutdown(baseUrl, { reloadKey = "", reason = "" } = {}) {
+  const body = {};
+  if (reloadKey) body.reload_key = reloadKey;
+  if (reason) body.reason = reason;
   try {
-    await fetch(`${baseUrl}/shutdown`, { method: "POST" });
+    await fetch(`${baseUrl}/shutdown`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
   } catch {
     // Best effort. If the server died before answering, the port will free up on its own.
   }
@@ -1390,11 +2093,22 @@ export function createServerSpawnOptions(logFd = null) {
   };
 }
 
-export async function fetchJson(url, { retries = 0, retryDelayMs = 250 } = {}) {
+/**
+ * @param {string} url
+ * @param {{ retries?: number, retryDelayMs?: number, onResponse?: ((response: Response) => void) | null, method?: string, headers?: Record<string, string>, body?: string }} [options]
+ */
+export async function fetchJson(
+  url,
+  { retries = 0, retryDelayMs = 250, onResponse = null, method = "GET", headers, body } = {},
+) {
   let response;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      response = await fetch(url);
+      response = await fetch(url, {
+        method,
+        ...(headers ? { headers } : {}),
+        ...(body === undefined ? {} : { body }),
+      });
       break;
     } catch (error) {
       if (error instanceof AxiError) throw error;
@@ -1405,8 +2119,29 @@ export async function fetchJson(url, { retries = 0, retryDelayMs = 250 } = {}) {
 
   if (!response) throw serverConnectionError();
   if (!response.ok) {
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      // Keep the generic transport error when the server did not send JSON.
+    }
+    if (payload?.code) {
+      const holder = payload.code.startsWith("LISTENER_") && payload.holder;
+      const holderDetail =
+        holder && typeof holder.label === "string" && Number.isFinite(holder.age_ms)
+          ? ` (current listener: ${holder.label}; active for ${Math.max(0, holder.age_ms)}ms)`
+          : "";
+      const error = new AxiError(
+        `${payload.error || `George Showroom request failed: ${response.status}`}${holderDetail}`,
+        payload.code,
+        ["Use --takeover only when you intend to displace the current listener"],
+      );
+      if (holder) Object.assign(error, { holder });
+      throw error;
+    }
     throw new AxiError(`George Showroom request failed: ${response.status}`, "SERVER_ERROR");
   }
+  onResponse?.(response);
   try {
     return await response.json();
   } catch {
@@ -1476,9 +2211,133 @@ function flagValue(args, flag) {
   return null;
 }
 
-function optionalFlagString(value) {
-  const trimmed = String(value ?? "").trim();
-  return trimmed || undefined;
+function inspectValueFlag(args, flag) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--") return { present: false };
+    if (arg === flag) {
+      return { present: true, value: i + 1 < args.length ? args[i + 1] : null, swallows: true };
+    }
+    if (arg.startsWith(`${flag}=`)) {
+      return { present: true, value: arg.slice(flag.length + 1), swallows: false };
+    }
+  }
+  return { present: false };
+}
+
+const AGENT_REPLY_FILE_HINT = "Pass --agent-reply-file <path>, or --agent-reply-file - to read stdin";
+
+function agentReplyTooLargeError() {
+  return new AxiError(`Agent reply exceeds the ${AGENT_REPLY_LIMIT_LABEL}`, "VALIDATION_ERROR", [
+    "Shorten the reply, then retry the same poll command",
+  ]);
+}
+
+/**
+ * @param {import("node:stream").Readable} stream
+ */
+async function readAgentReplyStream(stream) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const value of stream) {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    bytes += chunk.length;
+    if (bytes > AGENT_REPLY_INPUT_LIMIT_BYTES) {
+      stream.destroy();
+      throw agentReplyTooLargeError();
+    }
+    chunks.push(chunk);
+  }
+  const text = Buffer.concat(chunks, bytes).toString("utf8");
+  if (Buffer.byteLength(JSON.stringify({ agent_reply: text })) > AGENT_REPLY_JSON_LIMIT_BYTES) {
+    throw agentReplyTooLargeError();
+  }
+  return text;
+}
+
+/**
+ * Resolve the agent-reply body from `--agent-reply` or `--agent-reply-file`.
+ * File/stdin is the path for a longer Markdown body so newlines survive quoting.
+ *
+ * @param {string[]} args
+ * @param {{
+ *   createReadStreamFn?: typeof createReadStream,
+ *   stdin?: import("node:stream").Readable,
+ *   stdinIsTTY?: boolean,
+ * }} [io]
+ * @returns {Promise<string | null>}
+ */
+export async function resolveAgentReply(
+  args,
+  { createReadStreamFn = createReadStream, stdin = process.stdin, stdinIsTTY = process.stdin.isTTY === true } = {},
+) {
+  const inline = inspectValueFlag(args, "--agent-reply");
+  const fromFile = inspectValueFlag(args, "--agent-reply-file");
+  if (inline.present && fromFile.present) {
+    throw new AxiError("--agent-reply and --agent-reply-file cannot be combined", "VALIDATION_ERROR", [
+      "Pass --agent-reply for a concise quoted reply, or --agent-reply-file <path> (`-` for stdin) when a longer Markdown body is necessary",
+    ]);
+  }
+  if (fromFile.present) {
+    return readAgentReplyFile(fromFile, { createReadStreamFn, stdin, stdinIsTTY });
+  }
+  if (!inline.present) return null;
+  return inline.value || null;
+}
+
+/**
+ * @param {{ present: boolean, value?: string | null, swallows?: boolean }} fromFile
+ * @param {{
+ *   createReadStreamFn: typeof createReadStream,
+ *   stdin: import("node:stream").Readable,
+ *   stdinIsTTY: boolean,
+ * }} io
+ */
+async function readAgentReplyFile(fromFile, { createReadStreamFn, stdin, stdinIsTTY }) {
+  if (fromFile.swallows && typeof fromFile.value === "string" && fromFile.value.startsWith("--")) {
+    throw new AxiError(
+      `--agent-reply-file was given no value: the next argument ${fromFile.value} is another flag, so it would have been used as the path`,
+      "VALIDATION_ERROR",
+      [AGENT_REPLY_FILE_HINT, "Use --agent-reply-file=<path> if the path itself starts with --"],
+    );
+  }
+  const spec = fromFile.value;
+  if (spec == null || !String(spec).trim()) {
+    throw new AxiError("--agent-reply-file was given an empty value", "VALIDATION_ERROR", [AGENT_REPLY_FILE_HINT]);
+  }
+  let text;
+  if (spec === "-") {
+    if (stdinIsTTY) {
+      throw new AxiError("--agent-reply-file - cannot read stdin from a terminal", "VALIDATION_ERROR", [
+        "Pipe a Markdown body into stdin, or pass --agent-reply-file <path>",
+      ]);
+    }
+    try {
+      text = await readAgentReplyStream(stdin);
+    } catch (error) {
+      if (error instanceof AxiError) throw error;
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new AxiError(`Cannot read --agent-reply-file stdin: ${detail}`, "VALIDATION_ERROR", [
+        "Pipe a Markdown body into stdin, or pass --agent-reply-file <path>",
+      ]);
+    }
+  } else {
+    try {
+      text = await readAgentReplyStream(createReadStreamFn(spec));
+    } catch (error) {
+      if (error instanceof AxiError) throw error;
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new AxiError(`Cannot read --agent-reply-file ${spec}: ${detail}`, "VALIDATION_ERROR", [
+        "Pass a UTF-8 Markdown file, or `-` to read stdin",
+      ]);
+    }
+  }
+  if (!String(text || "").trim()) {
+    throw new AxiError("--agent-reply-file was empty", "VALIDATION_ERROR", [
+      'Write Markdown into the file, or pass --agent-reply "<message>" for a concise reply',
+    ]);
+  }
+  return String(text);
 }
 
 function isValueFlagToken(arg, flags) {
@@ -1497,21 +2356,21 @@ export function getCommandHelp(command, { agent = "generic" } = {}) {
 }
 
 function createTopLevelHelp({ agent = "generic" } = {}) {
-  return `george-showroom - George Showroom AXI\n\nUsage:\n  george-showroom\n  george-showroom <html-file> [--no-open] [--no-gate] [--reopen]\n  george-showroom poll <html-file> [--agent-reply "..."]\n  george-showroom end <html-file>\n  george-showroom export <html-file> [--out <path>]\n  george-showroom share <html-file> [--password <pw>] [--token <t>]\n  george-showroom stop\n  george-showroom playbook [playbook_id]\n  george-showroom design\n  george-showroom setup hooks\n  george-showroom setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls indefinitely by default until the user sends feedback or ends the session, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the George Showroom top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
+  return `george-showroom - George Showroom AXI\n\nUsage:\n  george-showroom\n  george-showroom <html-file> [--no-open] [--no-gate] [--reopen]\n  george-showroom poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]\n  george-showroom end <html-file>\n  george-showroom export <html-file> [--out <path>]\n  george-showroom share <html-file> [--private | --password <pw>] [--token <t>]\n  george-showroom share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  george-showroom share --unpublish --site <site_id> --update-key <key>\n  george-showroom stop\n  george-showroom playbook [playbook_id]\n  george-showroom design\n  george-showroom setup hooks\n  george-showroom setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the George Showroom top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
 }
 
 function createCommandHelp({ agent = "generic" } = {}) {
   return {
     open: `Usage: george-showroom <html-file> [--no-open] [--no-gate] [--reopen]\n\nOpen or resume a George Showroom review session for an HTML artifact. Use --no-open when you need to ensure the server/session exists without opening another browser window. Use --no-gate to skip the open-time layout curtain for this browser open. If the user explicitly ended the session from the browser, this refuses to reopen it and returns guidance instead - pass --reopen to force it open when the user asks for further review or something important needs their visual attention. Sessions ended by the agent (\`george-showroom end\`) reopen normally without the flag.\n`,
-    poll: `Usage: george-showroom poll <html-file> [--agent-reply "..."]\n\nThis command long-polls indefinitely for queued user prompts. It stays silent while it waits - that is normal, never kill it. Browser-detected layout issues do NOT return this poll: they are filed passively in the user's Layout issues inbox and arrive as an ordinary tag "layout-warnings" prompt only after the user selects them and queues the fixes. Warning lifecycle: an issue stays unresolved and counted while queued, becomes recurring if a newer artifact revision still shows it, and is resolved only after a newer artifact load plus a complete diagnostic pass at the same viewport no longer detects it. A failed or incomplete pass preserves it as unverified rather than clearing it. The only response that arrives without user action is artifact_failures - a fatal failure that made the review surface itself unusable. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} Use --agent-reply after applying prior feedback to display your response in George Showroom before waiting again. ${POLL_SEND_AND_END_RULE}\n`,
+    poll: `Usage: george-showroom poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]\n\nThis command exclusively long-polls for queued user prompts. Pass --owner <label> to make the active listener visible in session listings; --takeover displaces an existing listener, which receives LISTENER_REPLACED. A second poll without --takeover fails with LISTENER_ACTIVE instead of silently returning waiting.\n\nThis command long-polls indefinitely for queued user prompts. It stays silent while it waits - that is normal, never kill it. Browser-detected layout issues do NOT return this poll: they are filed passively in the user's Layout issues inbox and arrive as an ordinary tag "layout-warnings" prompt only after the user selects them and queues the fixes. Warning lifecycle: an issue stays unresolved and counted while queued, becomes recurring if a newer artifact revision still shows it, and is resolved only after a newer artifact load plus a complete diagnostic pass at the same viewport no longer detects it. A failed or incomplete pass preserves it as unverified rather than clearing it. The only response that arrives without user action is artifact_failures - a fatal failure that made the review surface itself unusable. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. In a Herdr-managed pane, set LAVISH_AXI_HERDR_CHIME=1 to request attention when the poll has entered its waiting state; unset it or use any other value to keep the current silent behavior. Notification failures never interrupt the poll. ${pollExecutionGuidance({ agent })} Use --agent-reply after applying prior feedback to display a concise response in George Showroom before waiting again. ${POLL_AGENT_REPLY_RULE} ${POLL_AGENT_REPLY_HELP_POINTER} Do not combine --agent-reply with --agent-reply-file.\n\nExamples:\n  george-showroom poll report.html --agent-reply "Renamed the payment step."\n  george-showroom poll report.html --agent-reply-file reply.md\n  george-showroom poll report.html --agent-reply-file -\n\n${POLL_SEND_AND_END_RULE}\n`,
     end: `Usage: george-showroom end <html-file>\n\nEnd a George Showroom session as the agent. A session ended this way still reopens normally on the next \`george-showroom <html-file>\`, unlike a user ending it from the browser, which requires --reopen.\n`,
     export: `Usage: george-showroom export <html-file> [--out <path>]\n\nWrite a portable copy of an artifact: one HTML file with its LOCAL assets inlined (relative-path stylesheets, scripts, images, and fonts become inline <style>/<script> blocks and data URIs). Remote CDN/font references (https URLs) are left as links for the browser to load, so the file needs network to render those. George Showroom makes no outbound requests - it only reads local files, confined to the artifact's directory. Defaults to writing <name>.export.html next to the source; pass --out to choose a path. The George Showroom annotation SDK is never included in an export.\n`,
-    share: `Usage: george-showroom share <html-file> [--password <pw>] [--token <t>]\n\nPublish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of George Showroom, and print a visitable URL. Shares are PUBLIC by default: anyone with the link can open the page, and it may be indexed or scraped. Pass --password to publish a PRIVATE password-protected page; viewers must supply the password to view. Builds the same local-inlined HTML as 'export' (local assets inlined; remote CDN/font URLs left as links and are not blocked by CSP on ht-ml.app, but still load over the viewer's network), then POSTs it to ht-ml.app's /v1 API. Creating a site needs no account or API key. The response includes the url plus a secret update_key (shown once) for updating or deleting the page later. Set LAVISH_AXI_HTML_APP_TOKEN (or pass --token) to attach an optional bearer token; it is never required. The annotation SDK is never included.\n`,
+    share: `Usage:\n  george-showroom share <html-file> [--private | --password <pw>] [--token <t>]\n  george-showroom share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  george-showroom share --unpublish --site <site_id> --update-key <key>\n\nPublish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of George Showroom, and print a visitable URL. Shares are PUBLIC by default: anyone with the link can open the page, and it may be indexed or scraped. Pass --private to publish a PRIVATE page behind a generated password, returned once in the output - give it to the user with the URL and tell them it is a shared secret. Pass --password <pw> instead when the user chose the password; it is never echoed back. Builds the same local-inlined HTML as 'export' (local assets inlined; remote CDN/font URLs left as links and are not blocked by CSP on ht-ml.app, but still load over the viewer's network), then POSTs it to ht-ml.app's /v1 API. Creating a site needs no account or API key. The response includes the url plus a secret update_key (shown once) for changing the page later.\n\n--site <site_id> with --update-key <key> republishes an existing page in place: same URL, new HTML. On a republish the password is left alone unless you pass --private (rotate to a new generated one) or --password <pw> (set one). There is no way to make a private page public again: ht-ml.app accepts a request to clear a password and silently ignores it, so George Showroom does not offer one rather than reporting a page as public while it is still gated. Locking a page that was PUBLIC is also not instant at ht-ml.app's CDN: it was observed still answering uncredentialed requests for minutes after the password was set, so do not tell the user a newly gated page is unreachable right away (a page that was already private has no such cached copy).\n\n--unpublish takes the same credentials and no file. ht-ml.app has NO delete endpoint, so this replaces the page with a short placeholder and locks it behind a random password that is immediately discarded; the URL still resolves and the host still holds what was published. Say that to the user rather than calling it deleted. The update_key still works, so republishing with --private brings the page back behind a new password.\n\nA value flag given an empty or whitespace-only value is REFUSED rather than acted on: an unquoted shell variable that is unset makes \`--password $PW\` an empty password, which the host treats as none and would publish a PUBLIC page while you believed it was gated. Quote the value, or pass --private to have George Showroom generate one.\n\nSet LAVISH_AXI_HTML_APP_TOKEN (or pass --token) to attach an optional bearer token when CREATING a page; it is never required. A republish (--site/--update-key) or --unpublish rejects --token, because the update_key is what the Authorization header carries there. The annotation SDK is never included.\n`,
     stop: `Usage: george-showroom stop [--port <port>]\n\nShut down the background George Showroom server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected.\n`,
     playbook: `Usage: george-showroom playbook [playbook_id]\n\nList focused artifact guidance playbooks, or show one playbook by ID. Known IDs: diagram, table, comparison, plan, code, input, slides.\n\n${PLAYBOOK_ROUTER_HELP}\n\nExamples:\n  george-showroom playbook\n  george-showroom playbook diagram\n  george-showroom playbook input\n`,
     design: `Usage: george-showroom design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, Mermaid diagram tooling, a content-to-playbook router, an optional layout safety CSS snippet, plus technical reference for DaisyUI components. ${PLAYBOOK_ROUTER_HELP} George Showroom artifacts stay portable HTML. This CDN snippet is the design fallback, not the default: inspect the subject project before falling back, and paste the layout safety CSS only when useful for dense nested grid/flex layouts, badges, wide fonts, or local media. ${DESIGN_PRIORITY_RULE}\n`,
     setup: `Usage: george-showroom setup hooks\n       george-showroom setup plugin\n\nhooks: install or repair agent SessionStart hooks for george-showroom ambient context in Claude Code, Codex, OpenCode, and GitHub Copilot CLI. Restart your agent session afterward to receive the context. This is the primary integration - it carries live session state.\n\nplugin: register the installed george-showroom package as an Agent Plugin (agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI. The installed package directory is itself the plugin root, so nothing is downloaded and no marketplace is involved. Reload each client afterward. Codex users should use \`setup hooks\` instead.\n\nBoth actions are explicit opt-in, idempotent, and repair a stale path after a reinstall.\n`,
-    server: `Usage: george-showroom server [--port 4387] [--verbose]\n\nRun the local George Showroom server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nLAVISH_AXI_HOST sets the bind address (default 127.0.0.1; a wildcard 0.0.0.0 or :: binds every interface). Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. LAVISH_AXI_LINK_HOST sets the hostname written into generated session links (default: the bind address, or loopback when bound to a wildcard). See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
+    server: `Usage: george-showroom server [--port 4387] [--verbose]\n\nRun the local George Showroom server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nBy default George Showroom binds to 127.0.0.1 and, when Tailscale is running, this machine's Tailscale IPv4. Any explicit LAVISH_AXI_HOST overrides automatic Tailscale binding; wildcard values such as 0.0.0.0 or :: are restricted to loopback. An explicit non-wildcard LAVISH_AXI_HOST sets one bind address; binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. With automatic binding enabled, a successfully bound Tailscale listener uses its MagicDNS name in generated session links; otherwise LAVISH_AXI_LINK_HOST can set the link hostname. See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
   };
 }
 
