@@ -85,7 +85,7 @@ ${home.help[home.help.length - 1]}
 
 ## Workflow
 
-1. Create the HTML artifact (default location \`georgesshowroom/<name>.html\` in the working directory).
+1. Create the HTML artifact (default location \`~/.lavish-axi/artifacts/<name>.html\` outside the implementation checkout).
 2. Run \`george-showroom <html-file>\` to open or resume a review session in the browser.
    Treat the returned \`/session/<id>\` URL as the only collaborative review
    surface. A direct \`file://\` artifact or bare artifact URL is preview-only:

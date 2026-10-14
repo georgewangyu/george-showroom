@@ -578,7 +578,11 @@ export async function serve({
 
   if (!allowAnyHostname) {
     app.use((req, res, next) => {
-      const requestHost = { host: req.headers.host, forwardedHost: req.headers["x-forwarded-host"] };
+      const forwardedHost = req.headers["x-forwarded-host"];
+      const requestHost = {
+        host: req.headers.host,
+        forwardedHost: Array.isArray(forwardedHost) ? forwardedHost.join(",") : forwardedHost,
+      };
       if (isAllowedRequestHost(requestHost, allowedHostnames)) {
         next();
         return;
@@ -2324,7 +2328,7 @@ export function isAllowedHostHeader(hostHeader, allowedHostnames) {
 // can only narrow access (Host is still checked), never widen it into a bypass. A
 // blank forwarded host is treated as absent, matching how proxies omit it.
 /**
- * @param {{ host?: string|undefined|null, forwardedHost?: string|undefined|null }} headers
+ * @param {{ host?: string|undefined|null, forwardedHost?: string|string[]|undefined|null }} headers
  * @param {Set<string>} allowedHostnames
  */
 export function isAllowedRequestHost({ host, forwardedHost }, allowedHostnames) {

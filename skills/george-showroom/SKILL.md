@@ -31,7 +31,7 @@ Use george-showroom when the user asks for a visual artifact, HTML explainer, in
 
 ## Workflow
 
-1. Create the HTML artifact (default location `georgesshowroom/<name>.html` in the working directory).
+1. Create the HTML artifact (default location `~/.lavish-axi/artifacts/<name>.html` outside the implementation checkout).
 2. Run `george-showroom <html-file>` to open or resume a review session in the browser.
    Treat the returned `/session/<id>` URL as the only collaborative review
    surface. A direct `file://` artifact or bare artifact URL is preview-only:
@@ -81,7 +81,7 @@ For flows, architecture, state, or sequence diagrams, do not hand-build boxes-an
 
 - Run `george-showroom <html-file>` to open or resume a George Showroom session. If the user explicitly ended the session from the browser, this refuses to reopen it and explains why instead of reopening uninvited - pass `--reopen` only when the user asks for further review or something important needs their visual attention
 - Treat only the CLI-returned http://127.0.0.1:<port>/session/<id> page as the collaborative review surface. A direct file:// artifact or bare artifact URL is preview-only and cannot show the outer Conversation, Send to Agent, or Send & End controls. Before claiming review is ready, verify the visible URL is the returned session URL and the outer chrome is present; if the reviewer used a direct-file tab, reopen the real session and warn that local-only notes were not queued
-- Unless the user specifies another location, create HTML artifacts in the current working directory under `georgesshowroom/`
+- Create HTML artifacts and browser captures in the operator's configured private artifact directory; when none is configured, use `~/.lavish-axi/artifacts/` outside the implementation checkout. Public repository checkouts contain reusable logic and deliberately publication-safe examples, never private review artifacts or raw browser captures
 - George Showroom serves the html file through a local express.js server. If your html needs to reference other filesystem assets such as images, CSS, fonts, and local scripts, copy them into the same directory as the HTML file, then reference them with relative paths from that directory. Never prepend `/` to those asset paths - root paths won't work
 - For a playback-first video review, add `<meta name="lavish-media-transport" content="video">` so Space/K toggles play/pause, J/L seeks 10 seconds, and Left/Right seeks 5 seconds across the artifact and host chrome. Add `<meta name="lavish-annotation-mode" content="off">` to start in explore mode while keeping the visible Annotate switch and Cmd/Ctrl+I available. Transport never captures modifier shortcuts or keys from text entry and interactive controls
 - The host sends all queued annotations plus the optional composer message as one idempotent batch. It retains the complete local batch until a payload-bound receipt exactly accounts for every item, including exact delivery of messages/timecodes and any explicit layout-warning deduplication. It shows sending/success/error state. The server-issued review incarnation is frozen with the pending browser batch; a stale prior-review batch remains retained and cannot replay after reopen. The current incarnation keeps a bounded retry ledger and fails closed rather than evicting unresolved identities. At capacity or after a stale-incarnation rejection, use Copy retained feedback or deliberately Unlock for requeue; the host never migrates, rotates, or replays the batch automatically

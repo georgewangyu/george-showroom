@@ -27,7 +27,7 @@ Do not use this profile for a conventional report, dense table, slide deck, or a
 
 ## Build contract
 
-1. Copy `assets/whiteboard.html` to `georgesshowroom/<name>-whiteboard.html` in the working directory.
+1. Copy `assets/whiteboard.html` to `~/.lavish-axi/artifacts/<name>-whiteboard.html` outside the implementation checkout.
 2. Replace the template's one full-canvas Mermaid seed with the user's content. Keep exactly one `.mermaid` container and prefer `flowchart TD` for a downward decision tree.
 3. Make the map broad enough to show the whole system, but keep node labels short: one idea per node, usually one or two lines. Use labeled edges for questions or decisions.
 4. Run `george-showroom <html-file>`. Verify the returned `/session/<id>` URL and the outer Conversation controls. Click the board once to edit inline or choose **Fullscreen** for the largest canvas.

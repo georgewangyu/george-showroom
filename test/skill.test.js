@@ -216,3 +216,16 @@ test("createSkillMarkdown documents installed-copy fallback for restricted sandb
   assert.match(md, /`node "\$\(npm root -g\)\/george-showroom\/dist\/cli\.mjs" <html-file>`/);
   assert.match(md, /`lavish-axi` remains a temporary compatibility alias/);
 });
+
+test("first artifact creation steps use private output outside the engine checkout", () => {
+  for (const markdown of [
+    createSkillMarkdown(),
+    createSkillMarkdown({ compatibilityAlias: true }),
+    createWhiteboardSkillMarkdown(),
+  ]) {
+    const firstStep = markdown.split("\n").find((line) => line.startsWith("1. "));
+    assert.match(firstStep, /~\/\.lavish-axi\/artifacts\//);
+    assert.match(firstStep, /outside the implementation checkout/);
+    assert.doesNotMatch(firstStep, /working directory|georgesshowroom\//);
+  }
+});
